@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from database import get_db
 from models import Device
 from auth import verify_token
-import uuid
 
 
 router = APIRouter()
@@ -14,6 +13,7 @@ router = APIRouter()
 
 class DeviceRequest(BaseModel):
 
+    device_id: str
     device_model: str
     os: str
     language: str
@@ -34,19 +34,31 @@ def register_device(
 
     user_id = verify_token(token)
 
-    device = Device(
-        id=str(uuid.uuid4()),
-        user_id=user_id,
-        device_model=req.device_model,
-        os=req.os,
-        language=req.language,
-        timezone=req.timezone
-    )
+    existing = db.query(Device).filter(Device.id == req.device_id).first()
 
-    db.add(device)
-    db.commit()
+    if existing:
+        if existing.user_id != user_id:
+            raise HTTPException(409, "Device is already linked to another user")
+        existing.device_model = req.device_model
+        existing.os = req.os
+        existing.language = req.language
+        existing.timezone = req.timezone
+        db.commit()
+        device_id = existing.id
+    else:
+        device = Device(
+            id=req.device_id,
+            user_id=user_id,
+            device_model=req.device_model,
+            os=req.os,
+            language=req.language,
+            timezone=req.timezone
+        )
+        db.add(device)
+        db.commit()
+        device_id = device.id
 
     return {
         "message": "Device registered",
-        "deviceId": device.id
+        "deviceId": device_id
     }

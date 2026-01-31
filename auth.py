@@ -1,12 +1,14 @@
 # auth.py
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from database import get_db
-from models import User
+from models import User, Device
 import uuid
 import jwt
 import datetime
+from pydantic import BaseModel
+from typing import Optional
 
 
 router = APIRouter()
@@ -32,19 +34,44 @@ def verify_token(token: str):
     return payload["user_id"]
 
 
+class AnonymousLoginRequest(BaseModel):
+
+    device_id: str
+    device_model: Optional[str] = None
+    os: Optional[str] = None
+    language: Optional[str] = None
+    timezone: Optional[str] = None
+
+
 @router.post("/v1/auth/anonymous")
-def anonymous_login(db: Session = Depends(get_db)):
+def anonymous_login(req: AnonymousLoginRequest, db: Session = Depends(get_db)):
 
-    user_id = str(uuid.uuid4())
+    if not req.device_id:
+        raise HTTPException(400, "device_id is required")
 
-    user = User(id=user_id)
+    device = db.query(Device).filter(Device.id == req.device_id).first()
 
-    db.add(user)
-    db.commit()
+    if device:
+        user_id = device.user_id
+    else:
+        user_id = str(uuid.uuid4())
+        user = User(id=user_id)
+        device = Device(
+            id=req.device_id,
+            user_id=user_id,
+            device_model=req.device_model,
+            os=req.os,
+            language=req.language,
+            timezone=req.timezone
+        )
+        db.add(user)
+        db.add(device)
+        db.commit()
 
     token = create_token(user_id)
 
     return {
         "userId": user_id,
-        "token": token
+        "token": token,
+        "deviceId": req.device_id
     }
