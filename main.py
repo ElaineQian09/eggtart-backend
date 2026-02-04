@@ -8,6 +8,7 @@ from models import Base
 from auth import router as auth_router
 from device import router as device_router
 from memory import router as memory_router
+from eggbook import router as eggbook_router
 
 
 # 创建表
@@ -24,6 +25,7 @@ app = FastAPI(
 app.include_router(auth_router)
 app.include_router(device_router)
 app.include_router(memory_router)
+app.include_router(eggbook_router)
 
 
 @app.get("/")

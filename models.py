@@ -1,6 +1,6 @@
 # models.py
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Float
+from sqlalchemy import Column, String, DateTime, ForeignKey, Float, Boolean, Date
 from database import Base
 import datetime
 
@@ -41,5 +41,75 @@ class Memory(Base):
     content = Column(String)
 
     importance = Column(Float)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class EggbookIdea(Base):
+
+    __tablename__ = "eggbook_ideas"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"))
+
+    title = Column(String)
+    content = Column(String)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow
+    )
+
+
+class EggbookTodo(Base):
+
+    __tablename__ = "eggbook_todos"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"))
+
+    title = Column(String)
+    is_accepted = Column(Boolean, default=False)
+    is_pinned = Column(Boolean, default=False)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow
+    )
+
+
+class EggbookNotification(Base):
+
+    __tablename__ = "eggbook_notifications"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"))
+    todo_id = Column(String, ForeignKey("eggbook_todos.id"), nullable=True)
+
+    title = Column(String)
+    notify_at = Column(DateTime)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow
+    )
+
+
+class EggbookComment(Base):
+
+    __tablename__ = "eggbook_comments"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"))
+
+    content = Column(String)
+    date = Column(Date, default=datetime.date.today)
+    is_community = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
