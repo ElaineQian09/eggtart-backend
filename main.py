@@ -14,8 +14,6 @@ import os
 import uvicorn
 
 
-# 创建表
-Base.metadata.create_all(bind=engine)
 
 
 app = FastAPI(
@@ -39,14 +37,3 @@ def health_check():
         "service": "Egg Backend"
     }
 
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    print("RUNNING ON PORT:", port)
-
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port
-    )
