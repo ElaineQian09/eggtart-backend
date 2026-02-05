@@ -10,9 +10,6 @@ from device import router as device_router
 from memory import router as memory_router
 from eggbook import router as eggbook_router
 
-import os
-import uvicorn
-
 
 
 

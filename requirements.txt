@@ -1,8 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 pyjwt
 pydantic
-pytest
-ruff
 httpx
