@@ -10,6 +10,9 @@ from device import router as device_router
 from memory import router as memory_router
 from eggbook import router as eggbook_router
 
+import os
+import uvicorn
+
 
 # 创建表
 Base.metadata.create_all(bind=engine)
@@ -35,3 +38,8 @@ def health_check():
         "status": "ok",
         "service": "Egg Backend"
     }
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
