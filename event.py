@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth import verify_token
+from ai_pipeline import process_events_ai
 from database import get_db
 from models import Device, Event
 
@@ -100,6 +101,14 @@ def create_event(
     )
     db.add(event)
     db.commit()
+    db.refresh(event)
+
+    try:
+        process_events_ai(db, user_id, event.id)
+    except Exception:
+        event.status = EVENT_STATUS_FAILED
+        db.commit()
+
     return {"eventId": event.id, "status": event.status}
 
 
@@ -136,6 +145,13 @@ def update_event(
         event.status = infer_status(event.recording_url, event.transcript)
 
     db.commit()
+
+    try:
+        process_events_ai(db, user_id, event.id)
+    except Exception:
+        event.status = EVENT_STATUS_FAILED
+        db.commit()
+
     return {"eventId": event.id, "status": event.status}
 
 

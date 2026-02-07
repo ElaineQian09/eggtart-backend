@@ -7,13 +7,14 @@ from models import User, Device
 import uuid
 import jwt
 import datetime
+import os
 from pydantic import BaseModel
 from typing import Optional
 
 
 router = APIRouter()
 
-SECRET_KEY = "egg-secret-key"
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-this-in-production-32bytes-minimum")
 ALGORITHM = "HS256"
 
 

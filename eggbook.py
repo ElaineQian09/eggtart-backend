@@ -63,7 +63,9 @@ class NotificationUpdateRequest(BaseModel):
 
 class CommentCreateRequest(BaseModel):
 
-    content: str
+    content: Optional[str] = None
+    egg_name: Optional[str] = None
+    egg_comment: Optional[str] = None
     date: Optional[date_type] = None
     isCommunity: Optional[bool] = False
 
@@ -101,9 +103,14 @@ def notification_to_dict(notification: EggbookNotification):
 
 
 def comment_to_dict(comment: EggbookComment):
+    content = comment.content
+    if bool(comment.is_community) and comment.egg_comment:
+        content = comment.egg_comment
     return {
         "id": comment.id,
-        "content": comment.content,
+        "content": content,
+        "eggName": comment.egg_name,
+        "eggComment": comment.egg_comment,
         "date": comment.date.isoformat(),
         "isCommunity": bool(comment.is_community),
         "createdAt": comment.created_at.isoformat()
@@ -408,8 +415,8 @@ def list_comments(
         .order_by(EggbookComment.created_at.desc())
         .all()
     )
-    my_egg = [comment_to_dict(c) for c in comments if c.user_id == user_id]
-    community = [comment_to_dict(c) for c in comments if c.user_id != user_id]
+    my_egg = [comment_to_dict(c) for c in comments if not bool(c.is_community)]
+    community = [comment_to_dict(c) for c in comments if bool(c.is_community)]
     return {"myEgg": my_egg, "community": community}
 
 
@@ -421,10 +428,17 @@ def create_comment(
 ):
     user_id = get_user_id(authorization)
     comment_date = req.date or date_type.today()
+    content = req.content
+    if bool(req.isCommunity):
+        content = req.egg_comment or req.content
+    if not content:
+        raise HTTPException(400, "content is required")
     comment = EggbookComment(
         id=str(uuid.uuid4()),
         user_id=user_id,
-        content=req.content,
+        content=content,
+        egg_name=req.egg_name if bool(req.isCommunity) else None,
+        egg_comment=req.egg_comment if bool(req.isCommunity) else None,
         date=comment_date,
         is_community=bool(req.isCommunity)
     )

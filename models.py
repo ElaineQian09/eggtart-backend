@@ -131,6 +131,8 @@ class EggbookComment(Base):
     user_id = Column(String, ForeignKey("users.id"))
 
     content = Column(String)
+    egg_name = Column(String, nullable=True)
+    egg_comment = Column(String, nullable=True)
     date = Column(Date, default=datetime.date.today)
     is_community = Column(Boolean, default=False)
 
