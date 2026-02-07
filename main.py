@@ -11,12 +11,18 @@ from memory import router as memory_router
 from eggbook import router as eggbook_router
 
 
-
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="Egg Backend",
     version="1.0"
 )
+
+
+@app.on_event("startup")
+def create_tables():
+    # Ensure newly added models are created in existing databases.
+    Base.metadata.create_all(bind=engine)
 
 
 # 注册路由
@@ -33,4 +39,3 @@ def health_check():
         "status": "ok",
         "service": "Egg Backend"
     }
-
