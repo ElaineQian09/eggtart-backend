@@ -9,6 +9,7 @@ import uuid
 
 from database import get_db
 from auth import verify_token
+from ai_pipeline import get_comment_generation_state, trigger_daily_comments_generation
 from models import (
     EggbookIdea,
     EggbookTodo,
@@ -68,6 +69,11 @@ class CommentCreateRequest(BaseModel):
     egg_comment: Optional[str] = None
     date: Optional[date_type] = None
     isCommunity: Optional[bool] = False
+
+
+class CommentGenerateRequest(BaseModel):
+
+    date: Optional[date_type] = None
 
 
 def idea_to_dict(idea: EggbookIdea):
@@ -396,15 +402,24 @@ def delete_notification(
 @router.get("/v1/eggbook/comments")
 def list_comments(
     date_str: str = Query(..., alias="date"),
-    days: int = Query(7, ge=1, le=30),
+    days: int = Query(7, ge=1, le=7),
     authorization: str = Header(...),
     db: Session = Depends(get_db)
 ):
     user_id = get_user_id(authorization)
+    cutoff_date = date_type.today() - timedelta(days=6)
+    (
+        db.query(EggbookComment)
+        .filter(EggbookComment.user_id == user_id, EggbookComment.date < cutoff_date)
+        .delete(synchronize_session=False)
+    )
+    db.commit()
     try:
         start_date = date_type.fromisoformat(date_str)
     except ValueError as exc:
         raise HTTPException(400, "Invalid date format") from exc
+    if start_date < cutoff_date:
+        start_date = cutoff_date
     end_date = start_date + timedelta(days=days)
     comments = (
         db.query(EggbookComment)
@@ -418,6 +433,31 @@ def list_comments(
     my_egg = [comment_to_dict(c) for c in comments if not bool(c.is_community)]
     community = [comment_to_dict(c) for c in comments if bool(c.is_community)]
     return {"myEgg": my_egg, "community": community}
+
+
+@router.get("/v1/eggbook/comments/status")
+def get_comment_status(
+    date_str: str = Query(..., alias="date"),
+    authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    user_id = get_user_id(authorization)
+    try:
+        target_date = date_type.fromisoformat(date_str)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid date format") from exc
+    return get_comment_generation_state(db, user_id, target_date)
+
+
+@router.post("/v1/eggbook/comments/generate")
+def generate_comments(
+    req: CommentGenerateRequest,
+    authorization: str = Header(...),
+    db: Session = Depends(get_db)
+):
+    user_id = get_user_id(authorization)
+    target_date = req.date or date_type.today()
+    return trigger_daily_comments_generation(db, user_id, target_date, manual=True)
 
 
 @router.post("/v1/eggbook/comments")

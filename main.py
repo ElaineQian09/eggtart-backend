@@ -11,6 +11,7 @@ from device import router as device_router
 from memory import router as memory_router
 from event import router as event_router
 from eggbook import router as eggbook_router
+from uploads import router as uploads_router
 
 app = FastAPI(
     title="Egg Backend",
@@ -71,6 +72,7 @@ app.include_router(device_router)
 app.include_router(memory_router)
 app.include_router(event_router)
 app.include_router(eggbook_router)
+app.include_router(uploads_router)
 
 
 @app.get("/")

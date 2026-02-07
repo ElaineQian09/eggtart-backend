@@ -139,3 +139,25 @@ class EggbookComment(Base):
     is_community = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class EggbookCommentGeneration(Base):
+
+    __tablename__ = "eggbook_comment_generations"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"))
+    date = Column(Date, default=datetime.date.today)
+
+    status = Column(String, default="idle")
+    has_input = Column(Boolean, default=False)
+    active_duration_sec = Column(Float, default=0)
+    trigger_mode = Column(String, nullable=True)  # auto | manual
+    error_message = Column(String, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow
+    )

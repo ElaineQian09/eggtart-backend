@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth import verify_token
-from ai_pipeline import GeminiRateLimitError, ai_enabled, process_events_ai
+from ai_pipeline import GeminiRateLimitError, ai_enabled, process_user_ai_queue
 from database import get_db
 from models import Device, Event
 from stt_client import stt_enabled, transcribe_audio_from_url
@@ -118,7 +118,8 @@ def create_event(
 
     event_at = req.event_at or datetime.now(timezone.utc)
     screen_recording_url = req.screen_recording_url or req.recording_url
-    status = infer_status(req.audio_url, screen_recording_url, req.transcript)
+    # POST only stores event; AI/STT is triggered on PATCH finalization.
+    status = EVENT_STATUS_PENDING
 
     event = Event(
         id=str(uuid.uuid4()),
@@ -135,34 +136,6 @@ def create_event(
     db.add(event)
     db.commit()
     db.refresh(event)
-
-    try:
-        _stt_fill_transcript(event, db)
-    except Exception:
-        logger.exception("STT failed for event %s", event.id)
-        event.status = EVENT_STATUS_FAILED
-        db.commit()
-        payload = event_to_dict(event)
-        payload["eventId"] = event.id
-        return payload
-
-    if not ai_enabled():
-        event.status = EVENT_STATUS_PENDING
-        db.commit()
-        payload = event_to_dict(event)
-        payload["eventId"] = event.id
-        return payload
-
-    try:
-        process_events_ai(db, user_id, event.id)
-    except GeminiRateLimitError:
-        logger.warning("AI rate limited for event %s, keeping status for retry", event.id)
-        event.status = EVENT_STATUS_TRANSCRIBING
-        db.commit()
-    except Exception:
-        logger.exception("AI processing failed for event %s", event.id)
-        event.status = EVENT_STATUS_FAILED
-        db.commit()
 
     payload = event_to_dict(event)
     payload["eventId"] = event.id
@@ -228,7 +201,7 @@ def update_event(
         return payload
 
     try:
-        process_events_ai(db, user_id, event.id)
+        process_user_ai_queue(db, user_id)
     except GeminiRateLimitError:
         logger.warning("AI rate limited for event %s, keeping status for retry", event.id)
         event.status = EVENT_STATUS_TRANSCRIBING
@@ -237,6 +210,8 @@ def update_event(
         logger.exception("AI processing failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
+    else:
+        db.refresh(event)
 
     payload = event_to_dict(event)
     payload["eventId"] = event.id

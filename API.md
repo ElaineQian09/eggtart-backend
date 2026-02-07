@@ -370,6 +370,9 @@ Response:
 ## Egg Book / Comments
 
 GET /v1/eggbook/comments?date=YYYY-MM-DD&days=7
+Notes:
+- `days` max is 7 (only latest 7 days are retained).
+
 Response:
 {
   "myEgg": [
@@ -394,6 +397,30 @@ Response:
       "createdAt": "datetime"
     }
   ]
+}
+
+GET /v1/eggbook/comments/status?date=YYYY-MM-DD
+Response:
+{
+  "date": "date",
+  "status": "idle | generating | ready | failed",
+  "hasInput": true,
+  "activeDurationSec": 3600,
+  "canManualTrigger": true
+}
+
+POST /v1/eggbook/comments/generate
+Request body:
+{
+  "date": "date (optional, default today)"
+}
+Response:
+{
+  "date": "date",
+  "status": "idle | generating | ready | failed",
+  "hasInput": true,
+  "activeDurationSec": 3600,
+  "canManualTrigger": true
 }
 
 POST /v1/eggbook/comments
@@ -422,7 +449,9 @@ Response:
 
 ## Event Aggregation & AI Pipeline (Server Behavior)
 
-- AI is triggered on `POST /v1/events` and `PATCH /v1/events/{id}`.
+- AI/STT trigger:
+  - `POST /v1/events` stores event only (no immediate AI processing).
+  - `PATCH /v1/events/{id}` triggers STT + AI queue processing.
 - STT behavior:
   - If `transcript` is empty and `audio_url` is present, backend attempts STT first.
   - On STT success, transcript is written back to event.
@@ -441,3 +470,12 @@ Response:
   - `transcribing` while STT/AI is in progress
   - `processed` on success
   - `failed` on STT/AI failure
+- Comments generation rules:
+  - Automatic generation is evaluated daily when AI pipeline runs.
+  - Auto trigger requires:
+    - At least one voice/screen input event on that date.
+    - Daily active duration (`sum(duration_sec)`) >= 3600 seconds.
+  - Manual trigger (`POST /v1/eggbook/comments/generate`) can run even when active duration < 3600, as long as there is input.
+  - Generation status is tracked per day: `idle | generating | ready | failed`.
+  - On successful generation, backend writes a notification entry indicating comments are ready.
+  - Comment data is retained for the latest 7 days only.

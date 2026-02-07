@@ -3,19 +3,34 @@ import logging
 import os
 import time
 import uuid
-from datetime import date as date_type, datetime
+from datetime import date as date_type, datetime, timedelta
+from threading import Lock
 from typing import Any, Dict, List
 
 import httpx
 from sqlalchemy.orm import Session
 
-from models import EggbookComment, EggbookIdea, EggbookNotification, EggbookTodo, Event
+from models import (
+    EggbookComment,
+    EggbookCommentGeneration,
+    EggbookIdea,
+    EggbookNotification,
+    EggbookTodo,
+    Event,
+)
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 logger = logging.getLogger(__name__)
+_USER_GUARD = Lock()
+_USER_PROCESSING: set[str] = set()
+_USER_LAST_RUN_AT: Dict[str, float] = {}
+COMMENT_STATUS_IDLE = "idle"
+COMMENT_STATUS_GENERATING = "generating"
+COMMENT_STATUS_READY = "ready"
+COMMENT_STATUS_FAILED = "failed"
 
 
 class GeminiRateLimitError(Exception):
@@ -315,98 +330,276 @@ def _upsert_comment(
     )
 
 
-def process_events_ai(db: Session, user_id: str, trigger_event_id: str) -> None:
-    if not ai_enabled():
-        return
+def _day_bounds(target_date: date_type) -> tuple[datetime, datetime]:
+    start_dt = datetime.combine(target_date, datetime.min.time())
+    end_dt = start_dt + timedelta(days=1)
+    return start_dt, end_dt
 
-    trigger_event = (
-        db.query(Event)
-        .filter(Event.id == trigger_event_id, Event.user_id == user_id)
-        .first()
+
+def _cleanup_old_comment_data(db: Session, user_id: str, keep_days: int = 7) -> None:
+    cutoff_date = date_type.today() - timedelta(days=keep_days - 1)
+    (
+        db.query(EggbookComment)
+        .filter(EggbookComment.user_id == user_id, EggbookComment.date < cutoff_date)
+        .delete(synchronize_session=False)
     )
-    if not trigger_event:
-        return
-
-    events_to_mark_processed: List[Event] = []
-
-    # Rule 1: recording_url is not null -> infer this event independently.
-    if _screen_recording_url(trigger_event) and trigger_event.status != "processed":
-        payload = _call_gemini_json(_build_items_prompt([trigger_event], single_mode=True))
-        items = payload.get("items") or []
-        _persist_items(db, user_id, items)
-        events_to_mark_processed.append(trigger_event)
-
-    # Rule 2: recording_url is null and transcript exists and not yet processed -> batch infer.
-    batch_events = (
-        db.query(Event)
-        .filter(
-            Event.user_id == user_id,
-            Event.screen_recording_url.is_(None),
-            Event.recording_url.is_(None),
-            Event.transcript.is_not(None),
-            Event.status.in_(["pending", "transcribing", "failed"]),
-        )
-        .order_by(Event.event_at.asc())
-        .limit(20)
-        .all()
+    (
+        db.query(EggbookCommentGeneration)
+        .filter(EggbookCommentGeneration.user_id == user_id, EggbookCommentGeneration.date < cutoff_date)
+        .delete(synchronize_session=False)
     )
-    if batch_events:
-        payload = _call_gemini_json(_build_items_prompt(batch_events, single_mode=False))
-        items = payload.get("items") or []
-        _persist_items(db, user_id, items)
-        events_to_mark_processed.extend(batch_events)
-
-    for event in events_to_mark_processed:
-        event.status = "processed"
     db.commit()
 
-    # Daily comments from generated idea/todo/alert fields.
-    today = date_type.today()
+
+def _get_or_create_comment_state(db: Session, user_id: str, target_date: date_type) -> EggbookCommentGeneration:
+    state = (
+        db.query(EggbookCommentGeneration)
+        .filter(EggbookCommentGeneration.user_id == user_id, EggbookCommentGeneration.date == target_date)
+        .first()
+    )
+    if state:
+        return state
+    state = EggbookCommentGeneration(
+        id=str(uuid.uuid4()),
+        user_id=user_id,
+        date=target_date,
+        status=COMMENT_STATUS_IDLE,
+        has_input=False,
+        active_duration_sec=0,
+    )
+    db.add(state)
+    db.commit()
+    db.refresh(state)
+    return state
+
+
+def _get_daily_input_stats(db: Session, user_id: str, target_date: date_type) -> tuple[bool, float]:
+    start_dt, end_dt = _day_bounds(target_date)
+    events = (
+        db.query(Event)
+        .filter(Event.user_id == user_id, Event.event_at >= start_dt, Event.event_at < end_dt)
+        .all()
+    )
+    has_input = any(
+        bool((e.audio_url or "").strip() or (e.screen_recording_url or e.recording_url or "").strip())
+        for e in events
+    )
+    active_duration_sec = float(sum(float(e.duration_sec or 0) for e in events))
+    return has_input, active_duration_sec
+
+
+def get_comment_generation_state(db: Session, user_id: str, target_date: date_type) -> Dict[str, Any]:
+    _cleanup_old_comment_data(db, user_id)
+    state = _get_or_create_comment_state(db, user_id, target_date)
+    has_input, active_duration_sec = _get_daily_input_stats(db, user_id, target_date)
+    state.has_input = has_input
+    state.active_duration_sec = active_duration_sec
+    if state.status in [COMMENT_STATUS_IDLE, COMMENT_STATUS_READY] and not has_input:
+        state.status = COMMENT_STATUS_IDLE
+    db.commit()
+    db.refresh(state)
+    return {
+        "date": target_date.isoformat(),
+        "status": state.status,
+        "hasInput": bool(state.has_input),
+        "activeDurationSec": int(state.active_duration_sec or 0),
+        "canManualTrigger": bool(state.has_input),
+    }
+
+
+def _send_comment_ready_notification(db: Session, user_id: str, target_date: date_type) -> None:
+    title = f"Comments ready for {target_date.isoformat()}"
+    exists = (
+        db.query(EggbookNotification)
+        .filter(
+            EggbookNotification.user_id == user_id,
+            EggbookNotification.title == title,
+        )
+        .first()
+    )
+    if exists:
+        return
+    now = datetime.utcnow()
+    db.add(
+        EggbookNotification(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            todo_id=None,
+            title=title,
+            notify_at=now,
+        )
+    )
+    db.commit()
+
+
+def trigger_daily_comments_generation(
+    db: Session,
+    user_id: str,
+    target_date: date_type,
+    manual: bool = False,
+) -> Dict[str, Any]:
+    _cleanup_old_comment_data(db, user_id)
+    state = _get_or_create_comment_state(db, user_id, target_date)
+    has_input, active_duration_sec = _get_daily_input_stats(db, user_id, target_date)
+
+    state.has_input = has_input
+    state.active_duration_sec = active_duration_sec
+    state.trigger_mode = "manual" if manual else "auto"
+
+    if not has_input:
+        state.status = COMMENT_STATUS_IDLE
+        state.error_message = "No voice/screen input for the day"
+        db.commit()
+        return get_comment_generation_state(db, user_id, target_date)
+
+    if (not manual) and active_duration_sec < 3600:
+        state.status = COMMENT_STATUS_IDLE
+        state.error_message = "Active duration below auto threshold (3600s)"
+        db.commit()
+        return get_comment_generation_state(db, user_id, target_date)
+
+    state.status = COMMENT_STATUS_GENERATING
+    state.error_message = None
+    db.commit()
+
+    start_dt, end_dt = _day_bounds(target_date)
     ideas = (
         db.query(EggbookIdea)
-        .filter(
-            EggbookIdea.user_id == user_id,
-            EggbookIdea.created_at >= datetime.combine(today, datetime.min.time()),
-        )
+        .filter(EggbookIdea.user_id == user_id, EggbookIdea.created_at >= start_dt, EggbookIdea.created_at < end_dt)
         .all()
     )
     todos = (
         db.query(EggbookTodo)
-        .filter(
-            EggbookTodo.user_id == user_id,
-            EggbookTodo.created_at >= datetime.combine(today, datetime.min.time()),
-        )
+        .filter(EggbookTodo.user_id == user_id, EggbookTodo.created_at >= start_dt, EggbookTodo.created_at < end_dt)
         .all()
     )
     alerts = (
         db.query(EggbookNotification)
         .filter(
             EggbookNotification.user_id == user_id,
-            EggbookNotification.created_at >= datetime.combine(today, datetime.min.time()),
+            EggbookNotification.created_at >= start_dt,
+            EggbookNotification.created_at < end_dt,
         )
         .all()
     )
-
     if not ideas and not todos and not alerts:
+        state.status = COMMENT_STATUS_IDLE
+        state.error_message = "No idea/todo/alert signals for the day"
+        db.commit()
+        return get_comment_generation_state(db, user_id, target_date)
+
+    try:
+        comments_payload = _call_gemini_json(_build_comments_prompt(ideas, todos, alerts))
+        my_comment = _safe_text(comments_payload.get("my_egg_comment"))
+        _upsert_comment(db, user_id, my_comment, target_date, False)
+
+        community_items = comments_payload.get("egg_community_comment") or []
+        for item in community_items:
+            egg_name = _safe_text(item.get("egg_name"))
+            egg_comment = _safe_text(item.get("egg_comment"))
+            text = f"{egg_name}: {egg_comment}" if egg_name else egg_comment
+            _upsert_comment(
+                db,
+                user_id,
+                text,
+                target_date,
+                True,
+                egg_name=egg_name,
+                egg_comment=egg_comment,
+            )
+        db.commit()
+        state.status = COMMENT_STATUS_READY
+        state.error_message = None
+        db.commit()
+        _send_comment_ready_notification(db, user_id, target_date)
+    except Exception as exc:
+        state.status = COMMENT_STATUS_FAILED
+        state.error_message = str(exc)[:500]
+        db.commit()
+        raise
+
+    return get_comment_generation_state(db, user_id, target_date)
+
+
+def _acquire_user_slot(user_id: str) -> bool:
+    cooldown_sec = float(os.getenv("AI_USER_COOLDOWN_SEC", "8"))
+    now = time.time()
+    with _USER_GUARD:
+        if user_id in _USER_PROCESSING:
+            return False
+        last_run = _USER_LAST_RUN_AT.get(user_id, 0.0)
+        if now - last_run < cooldown_sec:
+            return False
+        _USER_PROCESSING.add(user_id)
+        _USER_LAST_RUN_AT[user_id] = now
+        return True
+
+
+def _release_user_slot(user_id: str) -> None:
+    with _USER_GUARD:
+        _USER_PROCESSING.discard(user_id)
+
+
+def process_user_ai_queue(db: Session, user_id: str) -> None:
+    if not ai_enabled():
         return
 
-    comments_payload = _call_gemini_json(_build_comments_prompt(ideas, todos, alerts))
-    my_comment = _safe_text(comments_payload.get("my_egg_comment"))
-    _upsert_comment(db, user_id, my_comment, today, False)
+    if not _acquire_user_slot(user_id):
+        logger.info("Skip AI run: user slot busy/cooldown, user_id=%s", user_id)
+        return
 
-    community_items = comments_payload.get("egg_community_comment") or []
-    for item in community_items:
-        egg_name = _safe_text(item.get("egg_name"))
-        egg_comment = _safe_text(item.get("egg_comment"))
-        text = f"{egg_name}: {egg_comment}" if egg_name else egg_comment
-        _upsert_comment(
-            db,
-            user_id,
-            text,
-            today,
-            True,
-            egg_name=egg_name,
-            egg_comment=egg_comment,
+    try:
+        trigger_event = (
+            db.query(Event)
+            .filter(
+                Event.user_id == user_id,
+                Event.status.in_(["pending", "transcribing", "failed"]),
+            )
+            .order_by(Event.event_at.asc())
+            .first()
         )
+        if not trigger_event:
+            return
 
-    db.commit()
+        events_to_mark_processed: List[Event] = []
+
+        # Rule 1: screen recording exists -> infer this event independently.
+        if _screen_recording_url(trigger_event) and trigger_event.status != "processed":
+            payload = _call_gemini_json(_build_items_prompt([trigger_event], single_mode=True))
+            items = payload.get("items") or []
+            _persist_items(db, user_id, items)
+            events_to_mark_processed.append(trigger_event)
+
+        # Rule 2: no screen recording and transcript exists -> batch infer.
+        batch_events = (
+            db.query(Event)
+            .filter(
+                Event.user_id == user_id,
+                Event.screen_recording_url.is_(None),
+                Event.recording_url.is_(None),
+                Event.transcript.is_not(None),
+                Event.status.in_(["pending", "transcribing", "failed"]),
+            )
+            .order_by(Event.event_at.asc())
+            .limit(20)
+            .all()
+        )
+        if batch_events:
+            payload = _call_gemini_json(_build_items_prompt(batch_events, single_mode=False))
+            items = payload.get("items") or []
+            _persist_items(db, user_id, items)
+            events_to_mark_processed.extend(batch_events)
+
+        for event in events_to_mark_processed:
+            event.status = "processed"
+        db.commit()
+
+        trigger_daily_comments_generation(db, user_id, date_type.today(), manual=False)
+    finally:
+        _release_user_slot(user_id)
+
+
+def process_events_ai(db: Session, user_id: str, trigger_event_id: str) -> None:
+    # Backward-compatible wrapper.
+    _ = trigger_event_id
+    process_user_ai_queue(db, user_id)
