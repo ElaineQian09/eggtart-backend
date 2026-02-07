@@ -103,7 +103,6 @@ def _persist_items(db: Session, user_id: str, items: List[Dict[str, Any]]) -> in
 
 
 def _build_items_prompt(events: List[Event], single_mode: bool) -> str:
-    mode = "single event" if single_mode else "batched events"
     serialized = [
         {
             "event_id": e.id,
@@ -114,11 +113,42 @@ def _build_items_prompt(events: List[Event], single_mode: bool) -> str:
         }
         for e in events
     ]
+    if single_mode:
+        return (
+            "You are an assistant that extracts actionable productivity signals from ONE user event.\n"
+            "Task:\n"
+            "1) Read the event content.\n"
+            "2) Decide what should become idea/todo/alert outputs.\n"
+            "3) Return strict JSON only, no markdown.\n"
+            "Output JSON schema:\n"
+            "{\n"
+            '  "items": [\n'
+            "    {\n"
+            '      "scrolling_idea_title": "string",\n'
+            '      "scrolling_idea_detail": "string",\n'
+            '      "todo_item": "string",\n'
+            '      "alert": "string"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            "Field meanings and rules:\n"
+            "- scrolling_idea_title: short headline for a potentially valuable idea from this event.\n"
+            "- scrolling_idea_detail: concise explanation of that idea; include context and intent.\n"
+            "- todo_item: one concrete, executable next action; keep imperative and specific.\n"
+            "- alert: important risk/reminder/deadline to surface prominently.\n"
+            "- If a field has no meaningful content, use empty string.\n"
+            "- You may output multiple items if the event contains multiple independent thoughts.\n"
+            "- Preserve original language tone when possible.\n"
+            f"Input event JSON:\n{json.dumps(serialized, ensure_ascii=True)}"
+        )
+
     return (
-        "You are an assistant that extracts personal productivity data.\n"
-        f"Input mode: {mode}.\n"
-        "Return strict JSON only.\n"
-        "Schema:\n"
+        "You are an assistant that extracts actionable productivity signals from MULTIPLE user events.\n"
+        "Task:\n"
+        "1) Read all events as one context window.\n"
+        "2) Merge duplicates and cluster related points.\n"
+        "3) Return strict JSON only, no markdown.\n"
+        "Output JSON schema:\n"
         "{\n"
         '  "items": [\n'
         "    {\n"
@@ -129,8 +159,15 @@ def _build_items_prompt(events: List[Event], single_mode: bool) -> str:
         "    }\n"
         "  ]\n"
         "}\n"
-        "If a field has no content, return empty string.\n"
-        f"Events JSON:\n{json.dumps(serialized, ensure_ascii=True)}"
+        "Field meanings and rules:\n"
+        "- scrolling_idea_title: short headline for a synthesized idea across events.\n"
+        "- scrolling_idea_detail: compact detail that combines relevant evidence from the event set.\n"
+        "- todo_item: concrete next action derived from the strongest actionable signal.\n"
+        "- alert: urgent caution, conflict, or time-sensitive reminder detected in the batch.\n"
+        "- If a field has no meaningful content, use empty string.\n"
+        "- Prefer fewer, higher-quality items instead of repeating similar items.\n"
+        "- Do not invent facts that are not grounded in the input events.\n"
+        f"Input events JSON:\n{json.dumps(serialized, ensure_ascii=True)}"
     )
 
 
@@ -154,8 +191,11 @@ def _build_comments_prompt(
         ],
     }
     return (
-        "You summarize a user's day for two channels.\n"
-        "Return strict JSON only.\n"
+        "You summarize a user's day for two channels based on generated ideas/todos/alerts.\n"
+        "Task:\n"
+        "1) Write one personal reflection comment.\n"
+        "2) Write community-style comments with egg personas.\n"
+        "3) Return strict JSON only, no markdown.\n"
         "Schema:\n"
         "{\n"
         '  "my_egg_comment": "string",\n'
@@ -166,6 +206,14 @@ def _build_comments_prompt(
         "    }\n"
         "  ]\n"
         "}\n"
+        "Field meanings and rules:\n"
+        "- my_egg_comment: one direct summary for the user, supportive and specific, based on today's signals.\n"
+        "- egg_community_comment: list of community voices.\n"
+        "- egg_name: name of the persona speaking (e.g., Focus Egg, Health Egg).\n"
+        "- egg_comment: what that persona says; must be relevant, concise, and actionable.\n"
+        "- Keep each comment short (1-2 sentences).\n"
+        "- Do not include harmful, medical, legal, or financial claims.\n"
+        "- If there is little signal, still provide gentle, neutral comments without fabricating details.\n"
         f"Input JSON:\n{json.dumps(payload, ensure_ascii=True)}"
     )
 
