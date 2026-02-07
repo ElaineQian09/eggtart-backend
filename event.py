@@ -11,6 +11,7 @@ from auth import verify_token
 from ai_pipeline import ai_enabled, process_events_ai
 from database import get_db
 from models import Device, Event
+from stt_client import stt_enabled, transcribe_audio_from_url
 
 
 router = APIRouter()
@@ -36,10 +37,14 @@ def get_user_id(authorization: str) -> str:
 
 
 def event_to_dict(event: Event):
+    screen_recording_url = event.screen_recording_url or event.recording_url
     return {
         "eventId": event.id,
         "deviceId": event.device_id,
-        "recordingUrl": event.recording_url,
+        # Backward-compatible field for existing clients.
+        "recordingUrl": screen_recording_url,
+        "audioUrl": event.audio_url,
+        "screenRecordingUrl": screen_recording_url,
         "transcript": event.transcript,
         "durationSec": int(event.duration_sec or 0),
         "eventAt": event.event_at.isoformat(),
@@ -49,15 +54,18 @@ def event_to_dict(event: Event):
     }
 
 
-def infer_status(recording_url: Optional[str], transcript: Optional[str]) -> str:
+def infer_status(audio_url: Optional[str], screen_recording_url: Optional[str], transcript: Optional[str]) -> str:
     # "processed" should only be set after AI pipeline succeeds.
-    if transcript or recording_url:
+    if transcript or audio_url or screen_recording_url:
         return EVENT_STATUS_TRANSCRIBING
     return EVENT_STATUS_PENDING
 
 
 class EventCreateRequest(BaseModel):
     device_id: str
+    audio_url: Optional[str] = None
+    screen_recording_url: Optional[str] = None
+    # Deprecated, keep for backward compatibility.
     recording_url: Optional[str] = None
     transcript: Optional[str] = None
     duration_sec: Optional[int] = 0
@@ -65,11 +73,32 @@ class EventCreateRequest(BaseModel):
 
 
 class EventUpdateRequest(BaseModel):
+    audio_url: Optional[str] = None
+    screen_recording_url: Optional[str] = None
+    # Deprecated, keep for backward compatibility.
     recording_url: Optional[str] = None
     transcript: Optional[str] = None
     duration_sec: Optional[int] = None
     event_at: Optional[datetime] = None
     status: Optional[str] = None
+
+
+def _stt_fill_transcript(event: Event, db: Session) -> None:
+    if event.transcript:
+        return
+    audio_url = event.audio_url
+    if not audio_url:
+        return
+    if not stt_enabled():
+        return
+
+    event.status = EVENT_STATUS_TRANSCRIBING
+    db.commit()
+
+    transcript = transcribe_audio_from_url(audio_url)
+    if transcript:
+        event.transcript = transcript
+    db.commit()
 
 
 @router.post("/v1/events")
@@ -88,13 +117,16 @@ def create_event(
         raise HTTPException(404, "Device not found")
 
     event_at = req.event_at or datetime.now(timezone.utc)
-    status = infer_status(req.recording_url, req.transcript)
+    screen_recording_url = req.screen_recording_url or req.recording_url
+    status = infer_status(req.audio_url, screen_recording_url, req.transcript)
 
     event = Event(
         id=str(uuid.uuid4()),
         user_id=user_id,
         device_id=req.device_id,
-        recording_url=req.recording_url,
+        recording_url=screen_recording_url,
+        audio_url=req.audio_url,
+        screen_recording_url=screen_recording_url,
         transcript=req.transcript,
         duration_sec=float(req.duration_sec or 0),
         event_at=event_at,
@@ -104,10 +136,22 @@ def create_event(
     db.commit()
     db.refresh(event)
 
+    try:
+        _stt_fill_transcript(event, db)
+    except Exception:
+        logger.exception("STT failed for event %s", event.id)
+        event.status = EVENT_STATUS_FAILED
+        db.commit()
+        payload = event_to_dict(event)
+        payload["eventId"] = event.id
+        return payload
+
     if not ai_enabled():
         event.status = EVENT_STATUS_PENDING
         db.commit()
-        return {"eventId": event.id, "status": event.status}
+        payload = event_to_dict(event)
+        payload["eventId"] = event.id
+        return payload
 
     try:
         process_events_ai(db, user_id, event.id)
@@ -116,7 +160,9 @@ def create_event(
         event.status = EVENT_STATUS_FAILED
         db.commit()
 
-    return {"eventId": event.id, "status": event.status}
+    payload = event_to_dict(event)
+    payload["eventId"] = event.id
+    return payload
 
 
 @router.patch("/v1/events/{event_id}")
@@ -135,8 +181,14 @@ def update_event(
     if not event:
         raise HTTPException(404, "Event not found")
 
+    if req.audio_url is not None:
+        event.audio_url = req.audio_url
+    if req.screen_recording_url is not None:
+        event.screen_recording_url = req.screen_recording_url
+        event.recording_url = req.screen_recording_url
     if req.recording_url is not None:
         event.recording_url = req.recording_url
+        event.screen_recording_url = req.recording_url
     if req.transcript is not None:
         event.transcript = req.transcript
     if req.duration_sec is not None:
@@ -149,14 +201,27 @@ def update_event(
             raise HTTPException(400, "Invalid status")
         event.status = req.status
     else:
-        event.status = infer_status(event.recording_url, event.transcript)
+        screen_recording_url = event.screen_recording_url or event.recording_url
+        event.status = infer_status(event.audio_url, screen_recording_url, event.transcript)
 
     db.commit()
+
+    try:
+        _stt_fill_transcript(event, db)
+    except Exception:
+        logger.exception("STT failed for event %s", event.id)
+        event.status = EVENT_STATUS_FAILED
+        db.commit()
+        payload = event_to_dict(event)
+        payload["eventId"] = event.id
+        return payload
 
     if not ai_enabled():
         event.status = EVENT_STATUS_PENDING
         db.commit()
-        return {"eventId": event.id, "status": event.status}
+        payload = event_to_dict(event)
+        payload["eventId"] = event.id
+        return payload
 
     try:
         process_events_ai(db, user_id, event.id)
@@ -165,7 +230,9 @@ def update_event(
         event.status = EVENT_STATUS_FAILED
         db.commit()
 
-    return {"eventId": event.id, "status": event.status}
+    payload = event_to_dict(event)
+    payload["eventId"] = event.id
+    return payload
 
 
 @router.get("/v1/events/{event_id}")

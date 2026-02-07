@@ -54,6 +54,8 @@ class Event(Base):
     device_id = Column(String, ForeignKey("devices.id"))
 
     recording_url = Column(String, nullable=True)
+    audio_url = Column(String, nullable=True)
+    screen_recording_url = Column(String, nullable=True)
     transcript = Column(String, nullable=True)
     duration_sec = Column(Float, default=0)
     event_at = Column(DateTime, default=datetime.datetime.utcnow)

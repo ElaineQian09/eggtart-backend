@@ -72,6 +72,10 @@ def _safe_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _screen_recording_url(event: Event) -> str:
+    return (event.screen_recording_url or event.recording_url or "").strip()
+
+
 def _persist_items(db: Session, user_id: str, items: List[Dict[str, Any]]) -> int:
     created = 0
     now = datetime.utcnow()
@@ -122,6 +126,8 @@ def _build_items_prompt(events: List[Event], single_mode: bool) -> str:
         {
             "event_id": e.id,
             "event_at": e.event_at.isoformat() if e.event_at else None,
+            "audio_url": e.audio_url,
+            "screen_recording_url": _screen_recording_url(e),
             "recording_url": e.recording_url,
             "transcript": e.transcript,
             "duration_sec": e.duration_sec,
@@ -289,7 +295,7 @@ def process_events_ai(db: Session, user_id: str, trigger_event_id: str) -> None:
     events_to_mark_processed: List[Event] = []
 
     # Rule 1: recording_url is not null -> infer this event independently.
-    if trigger_event.recording_url and trigger_event.status != "processed":
+    if _screen_recording_url(trigger_event) and trigger_event.status != "processed":
         payload = _call_gemini_json(_build_items_prompt([trigger_event], single_mode=True))
         items = payload.get("items") or []
         _persist_items(db, user_id, items)
@@ -300,6 +306,7 @@ def process_events_ai(db: Session, user_id: str, trigger_event_id: str) -> None:
         db.query(Event)
         .filter(
             Event.user_id == user_id,
+            Event.screen_recording_url.is_(None),
             Event.recording_url.is_(None),
             Event.transcript.is_not(None),
             Event.status.in_(["pending", "transcribing", "failed"]),
