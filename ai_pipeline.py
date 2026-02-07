@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from datetime import date as date_type, datetime
@@ -11,8 +12,9 @@ from models import EggbookComment, EggbookIdea, EggbookNotification, EggbookTodo
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+logger = logging.getLogger(__name__)
 
 
 def ai_enabled() -> bool:
@@ -35,8 +37,16 @@ def _extract_json_text(response_json: Dict[str, Any]) -> str:
     return text
 
 
+def _validate_gemini3_model(model: str) -> str:
+    normalized = (model or "").strip()
+    if not normalized:
+        raise ValueError("GEMINI_MODEL is empty")
+    if not normalized.startswith("gemini-3"):
+        raise ValueError(f"Gemini 3 only mode enabled. Invalid model: {normalized}")
+    return normalized
+
+
 def _call_gemini_json(prompt: str) -> Dict[str, Any]:
-    url = f"{GEMINI_BASE_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -44,11 +54,16 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
             "responseMimeType": "application/json",
         },
     }
+    headers = {"x-goog-api-key": GEMINI_API_KEY}
+    model = _validate_gemini3_model(GEMINI_MODEL)
+    url = f"{GEMINI_BASE_URL}/{model}:generateContent"
+
     with httpx.Client(timeout=40.0) as client:
-        resp = client.post(url, json=payload)
+        resp = client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
+        logger.info("Gemini request succeeded with model=%s", model)
         text = _extract_json_text(resp.json())
-    return json.loads(text)
+        return json.loads(text)
 
 
 def _safe_text(value: Any) -> str:
