@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import date as date_type, datetime
 from typing import Any, Dict, List
@@ -15,6 +16,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 logger = logging.getLogger(__name__)
+
+
+class GeminiRateLimitError(Exception):
+    pass
 
 
 def ai_enabled() -> bool:
@@ -59,11 +64,41 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
     url = f"{GEMINI_BASE_URL}/{model}:generateContent"
 
     with httpx.Client(timeout=40.0) as client:
-        resp = client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        logger.info("Gemini request succeeded with model=%s", model)
-        text = _extract_json_text(resp.json())
-        return json.loads(text)
+        max_attempts = int(os.getenv("GEMINI_RETRY_MAX_ATTEMPTS", "4"))
+        base_delay = float(os.getenv("GEMINI_RETRY_BASE_DELAY_SEC", "1.0"))
+
+        for attempt in range(1, max_attempts + 1):
+            resp = client.post(url, json=payload, headers=headers)
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                logger.info("Gemini request succeeded with model=%s", model)
+                text = _extract_json_text(resp.json())
+                return json.loads(text)
+
+            retry_after = resp.headers.get("retry-after")
+            if retry_after is not None:
+                try:
+                    delay = max(float(retry_after), 0.5)
+                except ValueError:
+                    delay = base_delay * (2 ** (attempt - 1))
+            else:
+                delay = base_delay * (2 ** (attempt - 1))
+
+            logger.warning(
+                "Gemini rate limited (429), model=%s, attempt=%s/%s, sleeping %.2fs",
+                model,
+                attempt,
+                max_attempts,
+                delay,
+            )
+
+            if attempt == max_attempts:
+                raise GeminiRateLimitError(
+                    f"Gemini rate limited after {max_attempts} attempts, model={model}"
+                )
+            time.sleep(delay)
+
+    raise GeminiRateLimitError(f"Gemini rate limited, model={model}")
 
 
 def _safe_text(value: Any) -> str:

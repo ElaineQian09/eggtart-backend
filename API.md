@@ -73,7 +73,9 @@ POST /v1/events
 Request body:
 {
   "device_id": "string",
-  "recording_url": "string or null",
+  "audio_url": "string or null",
+  "screen_recording_url": "string or null",
+  "recording_url": "string or null (deprecated, backward compatibility)",
   "transcript": "string or null",
   "duration_sec": 0 (optional),
   "event_at": "datetime (optional, default now)"
@@ -81,21 +83,42 @@ Request body:
 Response:
 {
   "eventId": "string",
-  "status": "pending"
+  "deviceId": "string",
+  "recordingUrl": "string or null (backward-compatible alias of screenRecordingUrl)",
+  "audioUrl": "string or null",
+  "screenRecordingUrl": "string or null",
+  "transcript": "string or null",
+  "durationSec": 0,
+  "eventAt": "datetime",
+  "status": "pending | transcribing | processed | failed",
+  "createdAt": "datetime",
+  "updatedAt": "datetime"
 }
 
 PATCH /v1/events/{id}
 Request body:
 {
-  "recording_url": "string (optional)",
+  "audio_url": "string (optional)",
+  "screen_recording_url": "string (optional)",
+  "recording_url": "string (optional, deprecated, backward compatibility)",
   "transcript": "string (optional)",
   "duration_sec": 0 (optional),
-  "event_at": "datetime (optional)"
+  "event_at": "datetime (optional)",
+  "status": "pending | transcribing | processed | failed (optional)"
 }
 Response:
 {
   "eventId": "string",
-  "status": "pending | transcribing | processed | failed"
+  "deviceId": "string",
+  "recordingUrl": "string or null",
+  "audioUrl": "string or null",
+  "screenRecordingUrl": "string or null",
+  "transcript": "string or null",
+  "durationSec": 0,
+  "eventAt": "datetime",
+  "status": "pending | transcribing | processed | failed",
+  "createdAt": "datetime",
+  "updatedAt": "datetime"
 }
 
 GET /v1/events/{id}
@@ -104,6 +127,8 @@ Response:
   "eventId": "string",
   "deviceId": "string",
   "recordingUrl": "string or null",
+  "audioUrl": "string or null",
+  "screenRecordingUrl": "string or null",
   "transcript": "string or null",
   "durationSec": 0,
   "eventAt": "datetime",
@@ -351,6 +376,8 @@ Response:
     {
       "id": "string",
       "content": "string",
+      "eggName": "string or null",
+      "eggComment": "string or null",
       "date": "date",
       "isCommunity": false,
       "createdAt": "datetime"
@@ -360,6 +387,8 @@ Response:
     {
       "id": "string",
       "content": "string",
+      "eggName": "string or null",
+      "eggComment": "string or null",
       "date": "date",
       "isCommunity": true,
       "createdAt": "datetime"
@@ -370,7 +399,9 @@ Response:
 POST /v1/eggbook/comments
 Request body:
 {
-  "content": "string",
+  "content": "string (optional)",
+  "egg_name": "string (optional, mainly for community comment)",
+  "egg_comment": "string (optional, mainly for community comment)",
   "date": "date (optional)",
   "isCommunity": false (optional)
 }
@@ -379,6 +410,8 @@ Response:
   "item": {
     "id": "string",
     "content": "string",
+    "eggName": "string or null",
+    "eggComment": "string or null",
     "date": "date",
     "isCommunity": false,
     "createdAt": "datetime"
@@ -389,13 +422,22 @@ Response:
 
 ## Event Aggregation & AI Pipeline (Server Behavior)
 
-Aggregation logic is per-user and per-day:
-- Aggregate events where `recording_url` is null and `transcript` is not null.
-- Use a rolling window (e.g. last 10 minutes) to batch LLM calls.
-- LLM output is structured into `eggbook_ideas`, `eggbook_todos`, `eggbook_alerts`.
-- Each output row stores `source_event_id` for traceability.
-- Events are marked `processed` on success; `failed` on error.
-
-Comment generation:
-- A daily cron job generates comments based on the day’s eggbook entries.
-- Writes to `eggbook_comments` with `date` for readback.
+- AI is triggered on `POST /v1/events` and `PATCH /v1/events/{id}`.
+- STT behavior:
+  - If `transcript` is empty and `audio_url` is present, backend attempts STT first.
+  - On STT success, transcript is written back to event.
+- Event inference behavior:
+  - Single inference for event when `screen_recording_url` (or backward-compatible `recording_url`) is present.
+  - Batch inference for unprocessed events where:
+    - `screen_recording_url` is null
+    - `recording_url` is null
+    - `transcript` is not null
+- AI outputs are persisted into:
+  - `eggbook_ideas`
+  - `eggbook_todos`
+  - `eggbook_notifications` (used as alert storage)
+  - `eggbook_comments` (including structured community fields `egg_name`, `egg_comment`)
+- Event status:
+  - `transcribing` while STT/AI is in progress
+  - `processed` on success
+  - `failed` on STT/AI failure
