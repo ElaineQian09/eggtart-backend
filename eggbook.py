@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime, date, timedelta
+from datetime import datetime, date as date_type, timedelta
 import uuid
 
 from database import get_db
@@ -64,7 +64,7 @@ class NotificationUpdateRequest(BaseModel):
 class CommentCreateRequest(BaseModel):
 
     content: str
-    date: Optional[date] = None
+    date: Optional[date_type] = None
     isCommunity: Optional[bool] = False
 
 
@@ -395,7 +395,7 @@ def list_comments(
 ):
     user_id = get_user_id(authorization)
     try:
-        start_date = date.fromisoformat(date_str)
+        start_date = date_type.fromisoformat(date_str)
     except ValueError as exc:
         raise HTTPException(400, "Invalid date format") from exc
     end_date = start_date + timedelta(days=days)
@@ -420,7 +420,7 @@ def create_comment(
     db: Session = Depends(get_db)
 ):
     user_id = get_user_id(authorization)
-    comment_date = req.date or date.today()
+    comment_date = req.date or date_type.today()
     comment = EggbookComment(
         id=str(uuid.uuid4()),
         user_id=user_id,

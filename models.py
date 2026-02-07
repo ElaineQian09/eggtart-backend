@@ -45,6 +45,28 @@ class Memory(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
 
+class Event(Base):
+
+    __tablename__ = "events"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"))
+    device_id = Column(String, ForeignKey("devices.id"))
+
+    recording_url = Column(String, nullable=True)
+    transcript = Column(String, nullable=True)
+    duration_sec = Column(Float, default=0)
+    event_at = Column(DateTime, default=datetime.datetime.utcnow)
+    status = Column(String, default="pending")
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow
+    )
+
+
 class EggbookIdea(Base):
 
     __tablename__ = "eggbook_ideas"
