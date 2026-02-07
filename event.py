@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from typing import Optional
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -7,12 +8,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth import verify_token
-from ai_pipeline import process_events_ai
+from ai_pipeline import ai_enabled, process_events_ai
 from database import get_db
 from models import Device, Event
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 EVENT_STATUS_PENDING = "pending"
 EVENT_STATUS_TRANSCRIBING = "transcribing"
@@ -48,9 +50,8 @@ def event_to_dict(event: Event):
 
 
 def infer_status(recording_url: Optional[str], transcript: Optional[str]) -> str:
-    if transcript:
-        return EVENT_STATUS_PROCESSED
-    if recording_url:
+    # "processed" should only be set after AI pipeline succeeds.
+    if transcript or recording_url:
         return EVENT_STATUS_TRANSCRIBING
     return EVENT_STATUS_PENDING
 
@@ -103,9 +104,15 @@ def create_event(
     db.commit()
     db.refresh(event)
 
+    if not ai_enabled():
+        event.status = EVENT_STATUS_PENDING
+        db.commit()
+        return {"eventId": event.id, "status": event.status}
+
     try:
         process_events_ai(db, user_id, event.id)
     except Exception:
+        logger.exception("AI processing failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
 
@@ -146,9 +153,15 @@ def update_event(
 
     db.commit()
 
+    if not ai_enabled():
+        event.status = EVENT_STATUS_PENDING
+        db.commit()
+        return {"eventId": event.id, "status": event.status}
+
     try:
         process_events_ai(db, user_id, event.id)
     except Exception:
+        logger.exception("AI processing failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
 
