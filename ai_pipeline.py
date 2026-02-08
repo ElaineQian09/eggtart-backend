@@ -37,6 +37,10 @@ class GeminiRateLimitError(Exception):
     pass
 
 
+class GeminiTransientError(Exception):
+    pass
+
+
 def ai_enabled() -> bool:
     return bool(GEMINI_API_KEY)
 
@@ -78,12 +82,30 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
     model = _validate_gemini3_model(GEMINI_MODEL)
     url = f"{GEMINI_BASE_URL}/{model}:generateContent"
 
-    with httpx.Client(timeout=40.0) as client:
+    request_timeout = float(os.getenv("GEMINI_REQUEST_TIMEOUT_SEC", "60"))
+    with httpx.Client(timeout=request_timeout) as client:
         max_attempts = int(os.getenv("GEMINI_RETRY_MAX_ATTEMPTS", "4"))
         base_delay = float(os.getenv("GEMINI_RETRY_BASE_DELAY_SEC", "1.0"))
 
         for attempt in range(1, max_attempts + 1):
-            resp = client.post(url, json=payload, headers=headers)
+            try:
+                resp = client.post(url, json=payload, headers=headers)
+            except httpx.ReadTimeout:
+                delay = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "Gemini read timeout, model=%s, attempt=%s/%s, sleeping %.2fs",
+                    model,
+                    attempt,
+                    max_attempts,
+                    delay,
+                )
+                if attempt == max_attempts:
+                    raise GeminiTransientError(
+                        f"Gemini read timeout after {max_attempts} attempts, model={model}"
+                    )
+                time.sleep(delay)
+                continue
+
             if resp.status_code != 429:
                 resp.raise_for_status()
                 logger.info("Gemini request succeeded with model=%s", model)
@@ -108,12 +130,12 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
             )
 
             if attempt == max_attempts:
-                raise GeminiRateLimitError(
+                raise GeminiTransientError(
                     f"Gemini rate limited after {max_attempts} attempts, model={model}"
                 )
             time.sleep(delay)
 
-    raise GeminiRateLimitError(f"Gemini rate limited, model={model}")
+    raise GeminiTransientError(f"Gemini transient failure, model={model}")
 
 
 def _safe_text(value: Any) -> str:

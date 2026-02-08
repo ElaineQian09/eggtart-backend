@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth import verify_token
-from ai_pipeline import GeminiRateLimitError, ai_enabled, process_user_ai_queue
+from ai_pipeline import GeminiRateLimitError, GeminiTransientError, ai_enabled, process_user_ai_queue
 from database import get_db
 from models import Device, Event
 from stt_client import stt_enabled, transcribe_audio_from_url
@@ -202,8 +202,8 @@ def update_event(
 
     try:
         process_user_ai_queue(db, user_id)
-    except GeminiRateLimitError:
-        logger.warning("AI rate limited for event %s, keeping status for retry", event.id)
+    except (GeminiRateLimitError, GeminiTransientError):
+        logger.warning("AI transient error for event %s, keeping status for retry", event.id)
         event.status = EVENT_STATUS_TRANSCRIBING
         db.commit()
     except Exception:
