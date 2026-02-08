@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
@@ -16,7 +17,7 @@ logger = logging.getLogger("uvicorn.error")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_LIVE_WS_URL_TEMPLATE = os.getenv(
     "GEMINI_LIVE_WS_URL_TEMPLATE",
-    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={api_key}",
+    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={api_key}",
 )
 
 
@@ -135,7 +136,12 @@ async def realtime_ws_proxy(websocket: WebSocket):
         try:
             if websocket.client_state.name == "CONNECTED":
                 await websocket.send_text(
-                    '{"type":"error","source":"gemini","message":"Gemini websocket disconnected"}'
+                    (
+                        '{"type":"error","source":"gemini","message":"Gemini websocket disconnected",'
+                        f'"upstreamCloseCode":{int(code) if code is not None else "null"},'
+                        f'"upstreamCloseReason":{json.dumps(reason or "")}'
+                        "}"
+                    )
                 )
                 await websocket.close(code=1011, reason="Gemini websocket disconnected")
         except Exception:
