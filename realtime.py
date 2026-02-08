@@ -11,7 +11,7 @@ from auth import verify_token
 
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_LIVE_WS_URL_TEMPLATE = os.getenv(
@@ -41,14 +41,31 @@ def _build_live_ws_url() -> str:
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
-async def _client_to_gemini(client_ws: WebSocket, gemini_ws) -> None:
+def _sanitize_ws_url(url: str) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query))
+    if "key" in query:
+        query["key"] = "***"
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def _connection_meta(websocket: WebSocket) -> str:
+    host = (websocket.client.host if websocket.client else "unknown")
+    port = (websocket.client.port if websocket.client else "unknown")
+    return f"{host}:{port}"
+
+
+async def _client_to_gemini(client_ws: WebSocket, gemini_ws, conn_id: str) -> None:
     while True:
         message = await client_ws.receive()
         msg_type = message.get("type")
         if msg_type == "websocket.disconnect":
+            logger.info("Realtime[%s] client disconnected", conn_id)
             break
         text = message.get("text")
         if text is not None:
+            if '"setup"' in text:
+                logger.info("Realtime[%s] forwarding setup payload to Gemini", conn_id)
             await gemini_ws.send(text)
             continue
         data = message.get("bytes")
@@ -56,23 +73,26 @@ async def _client_to_gemini(client_ws: WebSocket, gemini_ws) -> None:
             await gemini_ws.send(data)
 
 
-async def _gemini_to_client(client_ws: WebSocket, gemini_ws) -> None:
+async def _gemini_to_client(client_ws: WebSocket, gemini_ws, conn_id: str) -> None:
     while True:
         message = await gemini_ws.recv()
         if isinstance(message, bytes):
             await client_ws.send_bytes(message)
         else:
+            if '"error"' in message:
+                logger.warning("Realtime[%s] Gemini payload contains error", conn_id)
             await client_ws.send_text(message)
 
 
 @router.websocket("/v1/realtime/ws")
 async def realtime_ws_proxy(websocket: WebSocket):
+    conn_id = _connection_meta(websocket)
     token = _extract_token(websocket)
     if not token:
         await websocket.close(code=4401, reason="Missing auth token")
         return
     try:
-        verify_token(token)
+        user_id = verify_token(token)
     except Exception:
         await websocket.close(code=4401, reason="Invalid auth token")
         return
@@ -83,13 +103,19 @@ async def realtime_ws_proxy(websocket: WebSocket):
 
     await websocket.accept()
     ws_url = _build_live_ws_url()
+    logger.info(
+        "Realtime[%s] accepted user_id=%s, connecting Gemini url=%s",
+        conn_id,
+        user_id,
+        _sanitize_ws_url(ws_url),
+    )
 
     try:
         async with ws_connect(ws_url, open_timeout=15, close_timeout=10) as gemini_ws:
-            logger.info("Realtime WS connected to Gemini Live")
+            logger.info("Realtime[%s] connected to Gemini Live", conn_id)
             tasks = {
-                asyncio.create_task(_client_to_gemini(websocket, gemini_ws)),
-                asyncio.create_task(_gemini_to_client(websocket, gemini_ws)),
+                asyncio.create_task(_client_to_gemini(websocket, gemini_ws, conn_id)),
+                asyncio.create_task(_gemini_to_client(websocket, gemini_ws, conn_id)),
             }
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
@@ -98,13 +124,29 @@ async def realtime_ws_proxy(websocket: WebSocket):
                 exc = task.exception()
                 if exc is not None and not isinstance(exc, (WebSocketDisconnect, ConnectionClosed)):
                     raise exc
+            if websocket.client_state.name == "CONNECTED":
+                await websocket.close(code=1000, reason="Session ended")
     except WebSocketDisconnect:
-        logger.info("Client realtime websocket disconnected")
-    except ConnectionClosed:
-        logger.info("Gemini realtime websocket disconnected")
-    except Exception as exc:
-        logger.exception("Realtime WS proxy error: %s", exc)
+        logger.info("Realtime[%s] client websocket disconnected", conn_id)
+    except ConnectionClosed as exc:
+        code = getattr(exc, "code", None)
+        reason = getattr(exc, "reason", "")
+        logger.info("Realtime[%s] Gemini websocket disconnected code=%s reason=%s", conn_id, code, reason)
         try:
-            await websocket.close(code=1011, reason="Realtime proxy error")
+            if websocket.client_state.name == "CONNECTED":
+                await websocket.send_text(
+                    '{"type":"error","source":"gemini","message":"Gemini websocket disconnected"}'
+                )
+                await websocket.close(code=1011, reason="Gemini websocket disconnected")
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.exception("Realtime[%s] proxy error: %s", conn_id, exc)
+        try:
+            if websocket.client_state.name == "CONNECTED":
+                await websocket.send_text(
+                    '{"type":"error","source":"proxy","message":"Realtime proxy error"}'
+                )
+                await websocket.close(code=1011, reason="Realtime proxy error")
         except Exception:
             pass
