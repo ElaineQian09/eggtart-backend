@@ -159,6 +159,8 @@ class EventUpdateRequest(BaseModel):
     duration_sec: Optional[int] = None
     event_at: Optional[datetime] = None
     status: Optional[str] = None
+    # Optional explicit trigger switch from client.
+    finalize: Optional[bool] = None
 
 
 def _stt_fill_transcript(event: Event, db: Session) -> None:
@@ -172,6 +174,13 @@ def _stt_fill_transcript(event: Event, db: Session) -> None:
 
     event.status = EVENT_STATUS_TRANSCRIBING
     db.commit()
+
+
+def _has_media_url(event: Event) -> bool:
+    return bool(
+        (event.audio_url or "").strip()
+        or (event.screen_recording_url or event.recording_url or "").strip()
+    )
 
     transcript = transcribe_audio_from_url(audio_url)
     if transcript:
@@ -260,6 +269,16 @@ def update_event(
         event.status = infer_status(event.audio_url, screen_recording_url, event.transcript)
 
     db.commit()
+
+    # Trigger gate: by default, do not run AI on transcript-only patches.
+    # This avoids duplicate AI runs when frontend PATCHes twice for one voice event
+    # (first transcript/duration, then media URL after upload).
+    allow_transcript_only_trigger = os.getenv("AI_TRIGGER_TRANSCRIPT_ONLY", "0") == "1"
+    should_trigger_processing = bool(req.finalize) or _has_media_url(event) or allow_transcript_only_trigger
+    if not should_trigger_processing:
+        payload = event_to_dict(event)
+        payload["eventId"] = event.id
+        return payload
 
     pending_audio_count = _count_pending_audio_batch_candidates(db, user_id)
     oldest_pending_audio_at = _oldest_pending_audio_event_at(db, user_id)
