@@ -111,6 +111,27 @@ def _count_pending_audio_batch_candidates(db: Session, user_id: str) -> int:
     return _audio_batch_candidates_query(db, user_id).count()
 
 
+def _pending_input_candidates_query(db: Session, user_id: str):
+    return (
+        db.query(Event)
+        .filter(
+            Event.user_id == user_id,
+            Event.status.in_([EVENT_STATUS_PENDING, EVENT_STATUS_TRANSCRIBING, EVENT_STATUS_FAILED]),
+            (
+                Event.audio_url.is_not(None)
+                | Event.screen_recording_url.is_not(None)
+                | Event.recording_url.is_not(None)
+                | Event.transcript.is_not(None)
+            ),
+        )
+        .order_by(Event.event_at.asc())
+    )
+
+
+def _count_pending_input_candidates(db: Session, user_id: str) -> int:
+    return _pending_input_candidates_query(db, user_id).count()
+
+
 def _run_audio_batch_stt(db: Session, user_id: str) -> int:
     events = _audio_batch_candidates_query(db, user_id).all()
     if not events:
@@ -136,6 +157,11 @@ def _run_audio_batch_stt(db: Session, user_id: str) -> int:
 
 def _oldest_pending_audio_event_at(db: Session, user_id: str) -> Optional[datetime]:
     oldest = _audio_batch_candidates_query(db, user_id).first()
+    return oldest.event_at if oldest else None
+
+
+def _oldest_pending_input_event_at(db: Session, user_id: str) -> Optional[datetime]:
+    oldest = _pending_input_candidates_query(db, user_id).first()
     return oldest.event_at if oldest else None
 
 
@@ -166,13 +192,21 @@ class EventUpdateRequest(BaseModel):
 def _stt_fill_transcript(event: Event, db: Session) -> None:
     if event.transcript:
         return
-    audio_url = event.audio_url
-    if not audio_url:
+    source_url = (
+        (event.audio_url or "").strip()
+        or (event.screen_recording_url or event.recording_url or "").strip()
+    )
+    if not source_url:
         return
     if not stt_enabled():
         return
 
     event.status = EVENT_STATUS_TRANSCRIBING
+    db.commit()
+
+    transcript = transcribe_audio_from_url(source_url)
+    if transcript:
+        event.transcript = transcript
     db.commit()
 
 
@@ -182,10 +216,46 @@ def _has_media_url(event: Event) -> bool:
         or (event.screen_recording_url or event.recording_url or "").strip()
     )
 
-    transcript = transcribe_audio_from_url(audio_url)
-    if transcript:
-        event.transcript = transcript
-    db.commit()
+
+def _has_any_input(event: Event) -> bool:
+    return bool(
+        (event.audio_url or "").strip()
+        or (event.screen_recording_url or event.recording_url or "").strip()
+        or (event.transcript or "").strip()
+    )
+
+
+def _run_pending_input_stt(db: Session, user_id: str) -> int:
+    events = _pending_input_candidates_query(db, user_id).all()
+    if not events:
+        return 0
+
+    processed = 0
+    for candidate in events:
+        if (candidate.transcript or "").strip():
+            continue
+        source_url = (
+            (candidate.audio_url or "").strip()
+            or (candidate.screen_recording_url or candidate.recording_url or "").strip()
+        )
+        if not source_url:
+            continue
+
+        candidate.status = EVENT_STATUS_TRANSCRIBING
+        db.commit()
+        try:
+            transcript = transcribe_audio_from_url(source_url)
+        except Exception:
+            logger.exception("Batch STT failed for event %s", candidate.id)
+            candidate.status = EVENT_STATUS_FAILED
+            db.commit()
+            continue
+
+        if transcript:
+            candidate.transcript = transcript
+            processed += 1
+        db.commit()
+    return processed
 
 
 @router.post("/v1/events")
@@ -280,20 +350,20 @@ def update_event(
         payload["eventId"] = event.id
         return payload
 
-    pending_audio_count = _count_pending_audio_batch_candidates(db, user_id)
-    oldest_pending_audio_at = _oldest_pending_audio_event_at(db, user_id)
+    pending_input_count = _count_pending_input_candidates(db, user_id)
+    oldest_pending_input_at = _oldest_pending_input_event_at(db, user_id)
     batch_wait_exceeded = False
-    if oldest_pending_audio_at is not None:
+    if oldest_pending_input_at is not None:
         threshold_dt = datetime.utcnow() - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
-        batch_wait_exceeded = oldest_pending_audio_at <= threshold_dt
-    should_delay_audio_processing = (
-        bool((event.audio_url or "").strip())
-        and not bool((event.transcript or "").strip())
-        and not bool((event.screen_recording_url or event.recording_url or "").strip())
-        and pending_audio_count < AUDIO_BATCH_TRIGGER_COUNT
+        batch_wait_exceeded = oldest_pending_input_at <= threshold_dt
+    has_screen_recording = bool((event.screen_recording_url or event.recording_url or "").strip())
+    should_delay_input_processing = (
+        _has_any_input(event)
+        and not has_screen_recording
+        and pending_input_count < AUDIO_BATCH_TRIGGER_COUNT
         and not batch_wait_exceeded
     )
-    if should_delay_audio_processing:
+    if should_delay_input_processing:
         event.status = EVENT_STATUS_TRANSCRIBING
         db.commit()
         payload = event_to_dict(event)
@@ -301,8 +371,11 @@ def update_event(
         return payload
 
     try:
-        if (pending_audio_count >= AUDIO_BATCH_TRIGGER_COUNT or batch_wait_exceeded) and stt_enabled():
-            _run_audio_batch_stt(db, user_id)
+        if has_screen_recording:
+            # Screen recording events should be processed immediately.
+            _stt_fill_transcript(event, db)
+        elif (pending_input_count >= AUDIO_BATCH_TRIGGER_COUNT or batch_wait_exceeded) and stt_enabled():
+            _run_pending_input_stt(db, user_id)
         else:
             _stt_fill_transcript(event, db)
     except Exception:
@@ -392,12 +465,12 @@ def debug_event_ai_state(
 
     flags = _event_ai_debug_flags(event)
     runtime = get_user_ai_runtime_state(user_id)
-    pending_audio_count = _count_pending_audio_batch_candidates(db, user_id)
-    oldest_pending_audio_at = _oldest_pending_audio_event_at(db, user_id)
+    pending_input_count = _count_pending_input_candidates(db, user_id)
+    oldest_pending_input_at = _oldest_pending_input_event_at(db, user_id)
     batch_wait_exceeded = False
-    if oldest_pending_audio_at is not None:
+    if oldest_pending_input_at is not None:
         threshold_dt = datetime.utcnow() - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
-        batch_wait_exceeded = oldest_pending_audio_at <= threshold_dt
+        batch_wait_exceeded = oldest_pending_input_at <= threshold_dt
     probable_reason = None
     if not runtime["aiEnabled"]:
         probable_reason = "AI disabled (missing GEMINI_API_KEY)"
@@ -405,8 +478,8 @@ def debug_event_ai_state(
         probable_reason = "User AI queue is currently processing"
     elif runtime["cooldownRemainingSec"] > 0:
         probable_reason = "User AI queue cooldown active"
-    elif pending_audio_count > 0 and pending_audio_count < AUDIO_BATCH_TRIGGER_COUNT and not batch_wait_exceeded:
-        probable_reason = "Waiting for audio batch trigger threshold"
+    elif pending_input_count > 0 and pending_input_count < AUDIO_BATCH_TRIGGER_COUNT and not batch_wait_exceeded:
+        probable_reason = "Waiting for input batch trigger threshold"
     elif not flags["eligibleForAiExtraction"]:
         probable_reason = "Event not eligible for extraction rules"
     elif event.status == EVENT_STATUS_TRANSCRIBING:
@@ -424,10 +497,12 @@ def debug_event_ai_state(
         "updatedAt": event.updated_at.isoformat() if event.updated_at else None,
         "signals": flags,
         "audioBatch": {
-            "pendingAudioCount": pending_audio_count,
+            "pendingInputCount": pending_input_count,
+            # Backward-compat alias for old debug readers.
+            "pendingAudioCount": pending_input_count,
             "triggerCount": AUDIO_BATCH_TRIGGER_COUNT,
             "maxWaitHours": AUDIO_BATCH_MAX_WAIT_HOURS,
-            "oldestPendingEventAt": oldest_pending_audio_at.isoformat() if oldest_pending_audio_at else None,
+            "oldestPendingEventAt": oldest_pending_input_at.isoformat() if oldest_pending_input_at else None,
             "waitExceeded": batch_wait_exceeded,
         },
         "runtime": runtime,
