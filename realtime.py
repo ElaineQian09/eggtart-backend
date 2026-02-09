@@ -75,11 +75,19 @@ async def _client_to_gemini(client_ws: WebSocket, gemini_ws, conn_id: str) -> No
 
 
 async def _gemini_to_client(client_ws: WebSocket, gemini_ws, conn_id: str) -> None:
+    first_message_logged = False
     while True:
         message = await gemini_ws.recv()
         if isinstance(message, bytes):
+            if not first_message_logged:
+                logger.info("Realtime[%s] first upstream message is bytes len=%s", conn_id, len(message))
+                first_message_logged = True
             await client_ws.send_bytes(message)
         else:
+            if not first_message_logged:
+                preview = message[:300]
+                logger.info("Realtime[%s] first upstream message text=%s", conn_id, preview)
+                first_message_logged = True
             if '"error"' in message:
                 logger.warning("Realtime[%s] Gemini payload contains error", conn_id)
             await client_ws.send_text(message)
@@ -115,15 +123,36 @@ async def realtime_ws_proxy(websocket: WebSocket):
         async with ws_connect(ws_url, open_timeout=15, close_timeout=10) as gemini_ws:
             logger.info("Realtime[%s] connected to Gemini Live", conn_id)
             tasks = {
-                asyncio.create_task(_client_to_gemini(websocket, gemini_ws, conn_id)),
-                asyncio.create_task(_gemini_to_client(websocket, gemini_ws, conn_id)),
+                asyncio.create_task(
+                    _client_to_gemini(websocket, gemini_ws, conn_id),
+                    name="client_to_gemini",
+                ),
+                asyncio.create_task(
+                    _gemini_to_client(websocket, gemini_ws, conn_id),
+                    name="gemini_to_client",
+                ),
             }
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            done_names = [task.get_name() for task in done]
+            logger.info("Realtime[%s] relay first completed tasks=%s", conn_id, done_names)
             for task in pending:
                 task.cancel()
             for task in done:
                 exc = task.exception()
-                if exc is not None and not isinstance(exc, (WebSocketDisconnect, ConnectionClosed)):
+                if exc is None:
+                    continue
+                if isinstance(exc, ConnectionClosed):
+                    code = getattr(exc, "code", None)
+                    reason = getattr(exc, "reason", "")
+                    logger.info(
+                        "Realtime[%s] task=%s upstream closed code=%s reason=%s",
+                        conn_id,
+                        task.get_name(),
+                        code,
+                        reason,
+                    )
+                    continue
+                if not isinstance(exc, WebSocketDisconnect):
                     raise exc
             if websocket.client_state.name == "CONNECTED":
                 await websocket.close(code=1000, reason="Session ended")
