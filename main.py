@@ -3,7 +3,7 @@
 import os
 import time
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from sqlalchemy import inspect, text
 
 from auth import verify_token
@@ -25,6 +25,8 @@ app = FastAPI(
 )
 APP_STARTED_AT = time.time()
 DEBUG_HEALTH_ENABLED = os.getenv("DEBUG_HEALTH_ENABLED", "0") == "1"
+DEBUG_RESET_ENABLED = os.getenv("DEBUG_RESET_ENABLED", "0") == "1"
+DEBUG_RESET_KEY = os.getenv("DEBUG_RESET_KEY", "")
 
 
 @app.on_event("startup")
@@ -123,3 +125,52 @@ def debug_health(authorization: str = Header(...)):
         },
         "aiQueue": get_ai_runtime_snapshot(user_id=user_id),
     }
+
+
+@app.post("/v1/debug/reset-data")
+def debug_reset_data(
+    authorization: str = Header(...),
+    scope: str = Query(default="events"),  # events | all
+    x_debug_reset_key: str | None = Header(default=None),
+):
+    if not DEBUG_RESET_ENABLED:
+        raise HTTPException(404, "Not Found")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Invalid token")
+    token = authorization.replace("Bearer ", "", 1)
+    _ = verify_token(token)
+
+    if DEBUG_RESET_KEY and x_debug_reset_key != DEBUG_RESET_KEY:
+        raise HTTPException(403, "Invalid reset key")
+
+    if scope not in {"events", "all"}:
+        raise HTTPException(400, "Invalid scope")
+
+    table_order = [
+        "eggbook_comment_generations",
+        "eggbook_comments",
+        "eggbook_notifications",
+        "eggbook_todos",
+        "eggbook_ideas",
+        "events",
+    ]
+    if scope == "all":
+        table_order.extend(["memories", "devices", "users"])
+
+    existing_tables = set(inspect(engine).get_table_names())
+    target_tables = [t for t in table_order if t in existing_tables]
+
+    if not target_tables:
+        return {"ok": True, "scope": scope, "clearedTables": []}
+
+    with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            table_sql = ", ".join(target_tables)
+            conn.execute(text(f"TRUNCATE TABLE {table_sql} CASCADE"))
+        else:
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            for table in target_tables:
+                conn.execute(text(f"DELETE FROM {table}"))
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+
+    return {"ok": True, "scope": scope, "clearedTables": target_tables}
