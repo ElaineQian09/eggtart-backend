@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import logging
 import os
@@ -35,6 +35,8 @@ VALID_EVENT_STATUSES = {
     EVENT_STATUS_FAILED,
 }
 EVENT_DEBUG_ENABLED = os.getenv("EVENT_DEBUG_ENABLED", "0") == "1"
+AUDIO_BATCH_TRIGGER_COUNT = int(os.getenv("AUDIO_BATCH_TRIGGER_COUNT", "5"))
+AUDIO_BATCH_MAX_WAIT_HOURS = float(os.getenv("AUDIO_BATCH_MAX_WAIT_HOURS", "12"))
 
 
 def get_user_id(authorization: str) -> str:
@@ -88,6 +90,53 @@ def _event_ai_debug_flags(event: Event) -> dict:
         "rule2BatchEligible": rule2_eligible,
         "eligibleForAiExtraction": eligible_any,
     }
+
+
+def _audio_batch_candidates_query(db: Session, user_id: str):
+    return (
+        db.query(Event)
+        .filter(
+            Event.user_id == user_id,
+            Event.audio_url.is_not(None),
+            Event.transcript.is_(None),
+            Event.screen_recording_url.is_(None),
+            Event.recording_url.is_(None),
+            Event.status.in_([EVENT_STATUS_PENDING, EVENT_STATUS_TRANSCRIBING, EVENT_STATUS_FAILED]),
+        )
+        .order_by(Event.event_at.asc())
+    )
+
+
+def _count_pending_audio_batch_candidates(db: Session, user_id: str) -> int:
+    return _audio_batch_candidates_query(db, user_id).count()
+
+
+def _run_audio_batch_stt(db: Session, user_id: str) -> int:
+    events = _audio_batch_candidates_query(db, user_id).all()
+    if not events:
+        return 0
+
+    processed = 0
+    for candidate in events:
+        candidate.status = EVENT_STATUS_TRANSCRIBING
+        db.commit()
+        try:
+            transcript = transcribe_audio_from_url(candidate.audio_url or "")
+        except Exception:
+            logger.exception("Batch STT failed for event %s", candidate.id)
+            candidate.status = EVENT_STATUS_FAILED
+            db.commit()
+            continue
+        if transcript:
+            candidate.transcript = transcript
+            processed += 1
+        db.commit()
+    return processed
+
+
+def _oldest_pending_audio_event_at(db: Session, user_id: str) -> Optional[datetime]:
+    oldest = _audio_batch_candidates_query(db, user_id).first()
+    return oldest.event_at if oldest else None
 
 
 class EventCreateRequest(BaseModel):
@@ -212,8 +261,31 @@ def update_event(
 
     db.commit()
 
+    pending_audio_count = _count_pending_audio_batch_candidates(db, user_id)
+    oldest_pending_audio_at = _oldest_pending_audio_event_at(db, user_id)
+    batch_wait_exceeded = False
+    if oldest_pending_audio_at is not None:
+        threshold_dt = datetime.now(timezone.utc) - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
+        batch_wait_exceeded = oldest_pending_audio_at <= threshold_dt
+    should_delay_audio_processing = (
+        bool((event.audio_url or "").strip())
+        and not bool((event.transcript or "").strip())
+        and not bool((event.screen_recording_url or event.recording_url or "").strip())
+        and pending_audio_count < AUDIO_BATCH_TRIGGER_COUNT
+        and not batch_wait_exceeded
+    )
+    if should_delay_audio_processing:
+        event.status = EVENT_STATUS_TRANSCRIBING
+        db.commit()
+        payload = event_to_dict(event)
+        payload["eventId"] = event.id
+        return payload
+
     try:
-        _stt_fill_transcript(event, db)
+        if (pending_audio_count >= AUDIO_BATCH_TRIGGER_COUNT or batch_wait_exceeded) and stt_enabled():
+            _run_audio_batch_stt(db, user_id)
+        else:
+            _stt_fill_transcript(event, db)
     except Exception:
         logger.exception("STT failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
@@ -301,6 +373,12 @@ def debug_event_ai_state(
 
     flags = _event_ai_debug_flags(event)
     runtime = get_user_ai_runtime_state(user_id)
+    pending_audio_count = _count_pending_audio_batch_candidates(db, user_id)
+    oldest_pending_audio_at = _oldest_pending_audio_event_at(db, user_id)
+    batch_wait_exceeded = False
+    if oldest_pending_audio_at is not None:
+        threshold_dt = datetime.now(timezone.utc) - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
+        batch_wait_exceeded = oldest_pending_audio_at <= threshold_dt
     probable_reason = None
     if not runtime["aiEnabled"]:
         probable_reason = "AI disabled (missing GEMINI_API_KEY)"
@@ -308,6 +386,8 @@ def debug_event_ai_state(
         probable_reason = "User AI queue is currently processing"
     elif runtime["cooldownRemainingSec"] > 0:
         probable_reason = "User AI queue cooldown active"
+    elif pending_audio_count > 0 and pending_audio_count < AUDIO_BATCH_TRIGGER_COUNT and not batch_wait_exceeded:
+        probable_reason = "Waiting for audio batch trigger threshold"
     elif not flags["eligibleForAiExtraction"]:
         probable_reason = "Event not eligible for extraction rules"
     elif event.status == EVENT_STATUS_TRANSCRIBING:
@@ -324,6 +404,13 @@ def debug_event_ai_state(
         "eventAt": event.event_at.isoformat() if event.event_at else None,
         "updatedAt": event.updated_at.isoformat() if event.updated_at else None,
         "signals": flags,
+        "audioBatch": {
+            "pendingAudioCount": pending_audio_count,
+            "triggerCount": AUDIO_BATCH_TRIGGER_COUNT,
+            "maxWaitHours": AUDIO_BATCH_MAX_WAIT_HOURS,
+            "oldestPendingEventAt": oldest_pending_audio_at.isoformat() if oldest_pending_audio_at else None,
+            "waitExceeded": batch_wait_exceeded,
+        },
         "runtime": runtime,
         "probableReason": probable_reason,
     }
