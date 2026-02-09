@@ -52,6 +52,14 @@ class AnonymousLoginRequest(BaseModel):
     timezone: Optional[str] = None
 
 
+def _ensure_user_exists(db: Session, user_id: str) -> None:
+    existing_user = db.query(User).filter(User.id == user_id).first()
+    if existing_user:
+        return
+    db.add(User(id=user_id))
+    db.commit()
+
+
 @router.post("/v1/auth/anonymous")
 def anonymous_login(req: AnonymousLoginRequest, db: Session = Depends(get_db)):
 
@@ -76,6 +84,9 @@ def anonymous_login(req: AnonymousLoginRequest, db: Session = Depends(get_db)):
         db.add(user)
         db.add(device)
         db.commit()
+
+    # Self-heal migrated environments where devices row exists but users row is missing.
+    _ensure_user_exists(db, user_id)
 
     token = create_token(user_id)
 
