@@ -318,17 +318,8 @@ def _build_comments_prompt(
         "JSON schema:\n"
         "{\n"
         '  "my_egg_comment": "string",\n'
-        '  "egg_community_comment": [\n'
-        "    {\n"
-        '      "egg_name": "string",\n'
-        '      "egg_comment": "string"\n'
-        "    }\n"
-        "  ]\n"
+        '  "egg_community_comment": ["string"]\n'
         "}\n"
-        "\n"
-        "Use different egg_name from this list when possible:\n"
-        "ancient egg, burning egg, sleepy egg, chaos egg, zen egg, study egg, "
-        "night owl egg, grind egg, soft egg, meme egg\n"
         "\n"
         "Now generate comments based on today's context.\n"
         f"Input JSON:\n{json.dumps(payload, ensure_ascii=True)}"
@@ -541,16 +532,21 @@ def trigger_daily_comments_generation(
 
         community_items = comments_payload.get("egg_community_comment") or []
         for item in community_items:
-            egg_name = _safe_text(item.get("egg_name"))
-            egg_comment = _safe_text(item.get("egg_comment"))
-            text = f"{egg_name}: {egg_comment}" if egg_name else egg_comment
+            if isinstance(item, str):
+                egg_comment = _safe_text(item)
+            elif isinstance(item, dict):
+                # Backward compatibility with old model outputs.
+                egg_comment = _safe_text(item.get("egg_comment") or item.get("content"))
+            else:
+                egg_comment = _safe_text(item)
+            text = egg_comment
             _upsert_comment(
                 db,
                 user_id,
                 text,
                 target_date,
                 True,
-                egg_name=egg_name,
+                egg_name="",
                 egg_comment=egg_comment,
             )
         db.commit()
