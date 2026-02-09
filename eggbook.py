@@ -424,6 +424,7 @@ def list_comments(
     comments = (
         db.query(EggbookComment)
         .filter(
+            EggbookComment.user_id == user_id,
             EggbookComment.date >= start_date,
             EggbookComment.date < end_date
         )

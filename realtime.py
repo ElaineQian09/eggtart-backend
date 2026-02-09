@@ -50,7 +50,7 @@ LIVE_PROMPT_TEXT = os.getenv(
         "Never invent facts beyond given input.\n\n"
         "Response Style\n\n"
         "Tone: warm, calm, encouraging\n\n"
-        "Length: 2-6 sentences unless needed\n\n"
+        "Length: 1 to 3 sentences unless needed\n\n"
         "Avoid jargon\n\n"
         "Avoid excessive emojis (max 1 per reply)\n\n"
         "Prefer practical guidance over theory\n\n"
