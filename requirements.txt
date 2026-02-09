@@ -5,4 +5,4 @@ pyjwt
 pydantic
 httpx
 websockets
-psycopg2-binary
+psycopg[binary]

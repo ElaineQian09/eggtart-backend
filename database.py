@@ -8,9 +8,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./egg.db").strip()
 
 
 def _normalize_database_url(url: str) -> str:
-    # Railway often exposes postgres://, SQLAlchemy expects postgresql://
+    # Railway often exposes postgres://; use psycopg driver explicitly.
     if url.startswith("postgres://"):
-        return "postgresql://" + url[len("postgres://"):]
+        return "postgresql+psycopg://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + url[len("postgresql://"):]
     return url
 
 
