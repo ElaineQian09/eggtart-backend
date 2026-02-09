@@ -564,6 +564,24 @@ def _release_user_slot(user_id: str) -> None:
         _USER_PROCESSING.discard(user_id)
 
 
+def get_user_ai_runtime_state(user_id: str) -> Dict[str, Any]:
+    cooldown_sec = float(os.getenv("AI_USER_COOLDOWN_SEC", "8"))
+    now = time.time()
+    with _USER_GUARD:
+        processing = user_id in _USER_PROCESSING
+        last_run_at = _USER_LAST_RUN_AT.get(user_id, 0.0)
+    elapsed = max(now - last_run_at, 0.0)
+    cooldown_remaining_sec = max(cooldown_sec - elapsed, 0.0)
+    return {
+        "aiEnabled": ai_enabled(),
+        "userProcessing": processing,
+        "cooldownSec": cooldown_sec,
+        "lastRunAtEpochSec": last_run_at if last_run_at > 0 else None,
+        "cooldownRemainingSec": round(cooldown_remaining_sec, 3),
+        "canRunNow": ai_enabled() and (not processing) and cooldown_remaining_sec <= 0,
+    }
+
+
 def process_user_ai_queue(db: Session, user_id: str) -> None:
     if not ai_enabled():
         return

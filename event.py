@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 import logging
+import os
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -8,7 +9,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from auth import verify_token
-from ai_pipeline import GeminiRateLimitError, GeminiTransientError, ai_enabled, process_user_ai_queue
+from ai_pipeline import (
+    GeminiRateLimitError,
+    GeminiTransientError,
+    ai_enabled,
+    get_user_ai_runtime_state,
+    process_user_ai_queue,
+)
 from database import get_db
 from models import Device, Event
 from stt_client import stt_enabled, transcribe_audio_from_url
@@ -27,6 +34,7 @@ VALID_EVENT_STATUSES = {
     EVENT_STATUS_PROCESSED,
     EVENT_STATUS_FAILED,
 }
+EVENT_DEBUG_ENABLED = os.getenv("EVENT_DEBUG_ENABLED", "0") == "1"
 
 
 def get_user_id(authorization: str) -> str:
@@ -59,6 +67,27 @@ def infer_status(audio_url: Optional[str], screen_recording_url: Optional[str], 
     if transcript or audio_url or screen_recording_url:
         return EVENT_STATUS_TRANSCRIBING
     return EVENT_STATUS_PENDING
+
+
+def _event_ai_debug_flags(event: Event) -> dict:
+    has_audio_url = bool((event.audio_url or "").strip())
+    has_screen_recording = bool((event.screen_recording_url or event.recording_url or "").strip())
+    has_transcript = bool((event.transcript or "").strip())
+
+    # Rule 1: screen recording exists -> single infer.
+    rule1_eligible = has_screen_recording
+    # Rule 2: no recording urls and transcript exists -> batch infer.
+    rule2_eligible = (not has_screen_recording) and (not has_audio_url) and has_transcript
+    eligible_any = rule1_eligible or rule2_eligible
+
+    return {
+        "hasAudioUrl": has_audio_url,
+        "hasScreenRecordingUrl": has_screen_recording,
+        "hasTranscript": has_transcript,
+        "rule1SingleEligible": rule1_eligible,
+        "rule2BatchEligible": rule2_eligible,
+        "eligibleForAiExtraction": eligible_any,
+    }
 
 
 class EventCreateRequest(BaseModel):
@@ -250,3 +279,51 @@ def get_event_status(
     if not event:
         raise HTTPException(404, "Event not found")
     return {"status": event.status}
+
+
+@router.get("/v1/debug/events/{event_id}/ai-state")
+def debug_event_ai_state(
+    event_id: str,
+    authorization: str = Header(...),
+    db: Session = Depends(get_db),
+):
+    if not EVENT_DEBUG_ENABLED:
+        raise HTTPException(404, "Not Found")
+
+    user_id = get_user_id(authorization)
+    event = (
+        db.query(Event)
+        .filter(Event.id == event_id, Event.user_id == user_id)
+        .first()
+    )
+    if not event:
+        raise HTTPException(404, "Event not found")
+
+    flags = _event_ai_debug_flags(event)
+    runtime = get_user_ai_runtime_state(user_id)
+    probable_reason = None
+    if not runtime["aiEnabled"]:
+        probable_reason = "AI disabled (missing GEMINI_API_KEY)"
+    elif runtime["userProcessing"]:
+        probable_reason = "User AI queue is currently processing"
+    elif runtime["cooldownRemainingSec"] > 0:
+        probable_reason = "User AI queue cooldown active"
+    elif not flags["eligibleForAiExtraction"]:
+        probable_reason = "Event not eligible for extraction rules"
+    elif event.status == EVENT_STATUS_TRANSCRIBING:
+        probable_reason = "AI/STT likely pending or transient failure retry path"
+    elif event.status == EVENT_STATUS_FAILED:
+        probable_reason = "Last AI/STT attempt failed"
+    elif event.status == EVENT_STATUS_PROCESSED:
+        probable_reason = "Processed successfully"
+
+    return {
+        "eventId": event.id,
+        "userId": user_id,
+        "status": event.status,
+        "eventAt": event.event_at.isoformat() if event.event_at else None,
+        "updatedAt": event.updated_at.isoformat() if event.updated_at else None,
+        "signals": flags,
+        "runtime": runtime,
+        "probableReason": probable_reason,
+    }
