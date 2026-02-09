@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -56,7 +57,12 @@ def _connection_meta(websocket: WebSocket) -> str:
     return f"{host}:{port}"
 
 
-async def _client_to_gemini(client_ws: WebSocket, gemini_ws, conn_id: str) -> None:
+async def _client_to_gemini(
+    client_ws: WebSocket,
+    gemini_ws,
+    conn_id: str,
+    runtime_state: dict,
+) -> None:
     while True:
         message = await client_ws.receive()
         msg_type = message.get("type")
@@ -65,32 +71,90 @@ async def _client_to_gemini(client_ws: WebSocket, gemini_ws, conn_id: str) -> No
             break
         text = message.get("text")
         if text is not None:
+            try:
+                payload = json.loads(text)
+            except Exception:
+                payload = None
             if '"setup"' in text:
                 logger.info("Realtime[%s] forwarding setup payload to Gemini", conn_id)
+            if payload and isinstance(payload, dict) and "realtimeInput" in payload:
+                realtime_input = payload.get("realtimeInput") or {}
+                media_chunks = realtime_input.get("mediaChunks") or []
+                if media_chunks and (not runtime_state.get("first_chunk_logged")):
+                    first_chunk = media_chunks[0] if isinstance(media_chunks[0], dict) else {}
+                    shell = {
+                        "realtimeInput": {
+                            "mediaChunks": [
+                                {
+                                    "mimeType": first_chunk.get("mimeType"),
+                                    "data": "<omitted>",
+                                }
+                            ]
+                        }
+                    }
+                    logger.info(
+                        "Realtime[%s] forwarding first chunk shell=%s",
+                        conn_id,
+                        json.dumps(shell, ensure_ascii=True),
+                    )
+                    runtime_state["first_chunk_logged"] = True
+                    runtime_state["first_chunk_at"] = time.time()
+                    runtime_state["post_chunk_message_logged"] = False
             await gemini_ws.send(text)
             continue
         data = message.get("bytes")
         if data is not None:
+            if not runtime_state.get("first_chunk_logged"):
+                runtime_state["first_chunk_logged"] = True
+                runtime_state["first_chunk_at"] = time.time()
+                runtime_state["post_chunk_message_logged"] = False
+                logger.info("Realtime[%s] forwarding first binary chunk len=%s", conn_id, len(data))
             await gemini_ws.send(data)
 
 
-async def _gemini_to_client(client_ws: WebSocket, gemini_ws, conn_id: str) -> None:
+async def _gemini_to_client(client_ws: WebSocket, gemini_ws, conn_id: str, runtime_state: dict) -> None:
     first_message_logged = False
     while True:
-        message = await gemini_ws.recv()
-        if isinstance(message, bytes):
-            if not first_message_logged:
-                logger.info("Realtime[%s] first upstream message is bytes len=%s", conn_id, len(message))
-                first_message_logged = True
-            await client_ws.send_bytes(message)
-        else:
-            if not first_message_logged:
-                preview = message[:300]
-                logger.info("Realtime[%s] first upstream message text=%s", conn_id, preview)
-                first_message_logged = True
-            if '"error"' in message:
-                logger.warning("Realtime[%s] Gemini payload contains error", conn_id)
-            await client_ws.send_text(message)
+        try:
+            message = await gemini_ws.recv()
+            if isinstance(message, bytes):
+                if not first_message_logged:
+                    logger.info("Realtime[%s] first upstream message is bytes len=%s", conn_id, len(message))
+                    first_message_logged = True
+                if runtime_state.get("first_chunk_logged") and not runtime_state.get("post_chunk_message_logged"):
+                    logger.info(
+                        "Realtime[%s] first upstream response after chunk is bytes len=%s",
+                        conn_id,
+                        len(message),
+                    )
+                    runtime_state["post_chunk_message_logged"] = True
+                await client_ws.send_bytes(message)
+            else:
+                if not first_message_logged:
+                    preview = message[:500]
+                    logger.info("Realtime[%s] first upstream message text=%s", conn_id, preview)
+                    first_message_logged = True
+                if runtime_state.get("first_chunk_logged") and not runtime_state.get("post_chunk_message_logged"):
+                    preview = message[:500]
+                    logger.info(
+                        "Realtime[%s] first upstream response after chunk text=%s",
+                        conn_id,
+                        preview,
+                    )
+                    runtime_state["post_chunk_message_logged"] = True
+                if '"error"' in message:
+                    logger.warning("Realtime[%s] Gemini payload contains error", conn_id)
+                await client_ws.send_text(message)
+        except ConnectionClosed as exc:
+            code = getattr(exc, "code", None)
+            reason = getattr(exc, "reason", "")
+            logger.info(
+                "Realtime[%s] gemini_to_client closed by upstream code=%s reason=%s",
+                conn_id,
+                code,
+                reason,
+            )
+            raise
 
 
 @router.websocket("/v1/realtime/ws")
@@ -122,13 +186,18 @@ async def realtime_ws_proxy(websocket: WebSocket):
     try:
         async with ws_connect(ws_url, open_timeout=15, close_timeout=10) as gemini_ws:
             logger.info("Realtime[%s] connected to Gemini Live", conn_id)
+            runtime_state = {
+                "first_chunk_logged": False,
+                "first_chunk_at": None,
+                "post_chunk_message_logged": False,
+            }
             tasks = {
                 asyncio.create_task(
-                    _client_to_gemini(websocket, gemini_ws, conn_id),
+                    _client_to_gemini(websocket, gemini_ws, conn_id, runtime_state),
                     name="client_to_gemini",
                 ),
                 asyncio.create_task(
-                    _gemini_to_client(websocket, gemini_ws, conn_id),
+                    _gemini_to_client(websocket, gemini_ws, conn_id, runtime_state),
                     name="gemini_to_client",
                 ),
             }

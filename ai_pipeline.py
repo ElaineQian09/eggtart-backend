@@ -81,6 +81,7 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
     headers = {"x-goog-api-key": GEMINI_API_KEY}
     model = _validate_gemini3_model(GEMINI_MODEL)
     url = f"{GEMINI_BASE_URL}/{model}:generateContent"
+    transient_statuses = {408, 429, 500, 502, 503, 504}
 
     request_timeout = float(os.getenv("GEMINI_REQUEST_TIMEOUT_SEC", "60"))
     with httpx.Client(timeout=request_timeout) as client:
@@ -106,7 +107,7 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
                 time.sleep(delay)
                 continue
 
-            if resp.status_code != 429:
+            if resp.status_code not in transient_statuses:
                 resp.raise_for_status()
                 logger.info("Gemini request succeeded with model=%s", model)
                 text = _extract_json_text(resp.json())
@@ -122,7 +123,8 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
                 delay = base_delay * (2 ** (attempt - 1))
 
             logger.warning(
-                "Gemini rate limited (429), model=%s, attempt=%s/%s, sleeping %.2fs",
+                "Gemini transient status=%s, model=%s, attempt=%s/%s, sleeping %.2fs",
+                resp.status_code,
                 model,
                 attempt,
                 max_attempts,
@@ -131,7 +133,7 @@ def _call_gemini_json(prompt: str) -> Dict[str, Any]:
 
             if attempt == max_attempts:
                 raise GeminiTransientError(
-                    f"Gemini rate limited after {max_attempts} attempts, model={model}"
+                    f"Gemini transient failure status={resp.status_code} after {max_attempts} attempts, model={model}"
                 )
             time.sleep(delay)
 
