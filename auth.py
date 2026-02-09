@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
-from database import get_db
+from database import SessionLocal, get_db
 from models import User, Device
 import uuid
 import jwt
@@ -40,6 +40,13 @@ def verify_token(token: str):
     user_id = payload.get("user_id")
     if not user_id:
         raise HTTPException(401, "Invalid token")
+    # Self-heal migrated databases: token may reference a user missing in `users`.
+    # Ensuring here prevents downstream FK failures in all authenticated endpoints.
+    db = SessionLocal()
+    try:
+        _ensure_user_exists(db, user_id)
+    finally:
+        db.close()
     return user_id
 
 
