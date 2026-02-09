@@ -284,7 +284,7 @@ def update_event(
     oldest_pending_audio_at = _oldest_pending_audio_event_at(db, user_id)
     batch_wait_exceeded = False
     if oldest_pending_audio_at is not None:
-        threshold_dt = datetime.now(timezone.utc) - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
+        threshold_dt = datetime.utcnow() - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
         batch_wait_exceeded = oldest_pending_audio_at <= threshold_dt
     should_delay_audio_processing = (
         bool((event.audio_url or "").strip())
@@ -396,7 +396,7 @@ def debug_event_ai_state(
     oldest_pending_audio_at = _oldest_pending_audio_event_at(db, user_id)
     batch_wait_exceeded = False
     if oldest_pending_audio_at is not None:
-        threshold_dt = datetime.now(timezone.utc) - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
+        threshold_dt = datetime.utcnow() - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
         batch_wait_exceeded = oldest_pending_audio_at <= threshold_dt
     probable_reason = None
     if not runtime["aiEnabled"]:
