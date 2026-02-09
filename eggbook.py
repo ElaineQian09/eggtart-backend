@@ -123,6 +123,17 @@ def comment_to_dict(comment: EggbookComment):
     }
 
 
+@router.get("/v1/eggbook/sync-status")
+def get_sync_status(
+    authorization: str = Header(...),
+):
+    _ = get_user_id(authorization)
+    return {
+        "status": "ok",
+        "lastSyncAt": None,
+    }
+
+
 @router.get("/v1/eggbook/ideas")
 def list_ideas(
     authorization: str = Header(...),
