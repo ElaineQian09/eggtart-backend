@@ -7,7 +7,7 @@ import time
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from fastapi import APIRouter, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from websockets import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
@@ -70,6 +70,7 @@ LIVE_PROMPT_TEXT = os.getenv(
 LIVE_PROMPT_VERSION = os.getenv("LIVE_PROMPT_VERSION", "v1")
 LIVE_PROMPT_INJECTION_MODE = os.getenv("LIVE_PROMPT_INJECTION_MODE", "setup")  # setup|none
 LIVE_INCLUDE_CONTEXT = os.getenv("LIVE_INCLUDE_CONTEXT", "1") == "1"
+LIVE_DEBUG_CONTEXT_ENABLED = os.getenv("LIVE_DEBUG_CONTEXT_ENABLED", "0") == "1"
 
 
 def _extract_token_from_ws(websocket: WebSocket) -> str:
@@ -321,6 +322,27 @@ def live_config(authorization: str = Header(...)):
         "promptVersion": LIVE_PROMPT_VERSION,
         "promptInjectionMode": LIVE_PROMPT_INJECTION_MODE,
         "supportsPcm16k": True,
+    }
+
+
+@router.get("/v1/debug/live-context")
+def debug_live_context(
+    authorization: str = Header(...),
+    user_id: str | None = Query(default=None),
+):
+    if not LIVE_DEBUG_CONTEXT_ENABLED:
+        raise HTTPException(404, "Not Found")
+
+    token = _extract_token_from_header(authorization)
+    requester_user_id = verify_token(token)
+    target_user_id = user_id or requester_user_id
+    if target_user_id != requester_user_id:
+        raise HTTPException(403, "Forbidden")
+
+    return {
+        "userId": target_user_id,
+        "promptVersion": LIVE_PROMPT_VERSION,
+        "context": _fetch_top3_context(target_user_id),
     }
 
 
