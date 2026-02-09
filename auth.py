@@ -29,10 +29,17 @@ def create_token(user_id: str):
 
 
 def verify_token(token: str):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid token")
 
-    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-
-    return payload["user_id"]
+    user_id = payload.get("user_id")
+    if not user_id:
+        raise HTTPException(401, "Invalid token")
+    return user_id
 
 
 class AnonymousLoginRequest(BaseModel):
