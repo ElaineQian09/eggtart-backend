@@ -1,6 +1,6 @@
 # auth.py
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 from database import get_db
 from models import User, Device
@@ -16,6 +16,7 @@ router = APIRouter()
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-this-in-production-32bytes-minimum")
 ALGORITHM = "HS256"
+DEBUG_DEVICE_LOOKUP_ENABLED = os.getenv("DEBUG_DEVICE_LOOKUP_ENABLED", "0") == "1"
 
 
 def create_token(user_id: str):
@@ -92,3 +93,54 @@ def whoami(authorization: str = Header(...)):
     token = authorization.replace("Bearer ", "", 1)
     user_id = verify_token(token)
     return {"userId": user_id}
+
+
+@router.get("/v1/debug/device-bindings")
+def debug_device_bindings(
+    authorization: str = Header(...),
+    device_id: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    if not DEBUG_DEVICE_LOOKUP_ENABLED:
+        raise HTTPException(404, "Not Found")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Invalid token")
+    token = authorization.replace("Bearer ", "", 1)
+    requester_user_id = verify_token(token)
+
+    query = db.query(Device)
+    if device_id:
+        query = query.filter(Device.id == device_id)
+    else:
+        query = query.filter(Device.user_id == requester_user_id)
+    devices = query.order_by(Device.created_at.desc()).limit(limit).all()
+
+    users = (
+        db.query(User)
+        .order_by(User.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "requesterUserId": requester_user_id,
+        "deviceBindings": [
+            {
+                "deviceId": d.id,
+                "userId": d.user_id,
+                "deviceModel": d.device_model,
+                "os": d.os,
+                "language": d.language,
+                "timezone": d.timezone,
+                "createdAt": d.created_at.isoformat() if d.created_at else None,
+            }
+            for d in devices
+        ],
+        "recentUsers": [
+            {
+                "userId": u.id,
+                "createdAt": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in users
+        ],
+    }
