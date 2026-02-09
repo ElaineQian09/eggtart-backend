@@ -1,6 +1,6 @@
 # auth.py
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from database import get_db
 from models import User, Device
@@ -83,3 +83,12 @@ def anonymous_login(req: AnonymousLoginRequest, db: Session = Depends(get_db)):
         "token": token,
         "deviceId": req.device_id
     }
+
+
+@router.get("/v1/auth/whoami")
+def whoami(authorization: str = Header(...)):
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Invalid token")
+    token = authorization.replace("Bearer ", "", 1)
+    user_id = verify_token(token)
+    return {"userId": user_id}
