@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 _USER_GUARD = Lock()
 _USER_PROCESSING: set[str] = set()
 _USER_LAST_RUN_AT: Dict[str, float] = {}
+_LAST_AI_ERROR: Dict[str, Any] = {}
 COMMENT_STATUS_IDLE = "idle"
 COMMENT_STATUS_GENERATING = "generating"
 COMMENT_STATUS_READY = "ready"
@@ -564,6 +565,20 @@ def _release_user_slot(user_id: str) -> None:
         _USER_PROCESSING.discard(user_id)
 
 
+def _record_ai_error(user_id: str, event_id: str | None, exc: Exception) -> None:
+    with _USER_GUARD:
+        _LAST_AI_ERROR.clear()
+        _LAST_AI_ERROR.update(
+            {
+                "atEpochSec": time.time(),
+                "userId": user_id,
+                "eventId": event_id,
+                "type": type(exc).__name__,
+                "message": str(exc)[:500],
+            }
+        )
+
+
 def get_user_ai_runtime_state(user_id: str) -> Dict[str, Any]:
     cooldown_sec = float(os.getenv("AI_USER_COOLDOWN_SEC", "8"))
     now = time.time()
@@ -582,6 +597,24 @@ def get_user_ai_runtime_state(user_id: str) -> Dict[str, Any]:
     }
 
 
+def get_ai_runtime_snapshot(user_id: str | None = None) -> Dict[str, Any]:
+    with _USER_GUARD:
+        processing_users = list(_USER_PROCESSING)
+        tracked_users = len(_USER_LAST_RUN_AT)
+        last_error = dict(_LAST_AI_ERROR) if _LAST_AI_ERROR else None
+
+    snapshot = {
+        "aiEnabled": ai_enabled(),
+        "activeProcessingUserCount": len(processing_users),
+        "activeProcessingUsers": processing_users[:20],
+        "trackedUserCount": tracked_users,
+        "lastAiError": last_error,
+    }
+    if user_id:
+        snapshot["userRuntime"] = get_user_ai_runtime_state(user_id)
+    return snapshot
+
+
 def process_user_ai_queue(db: Session, user_id: str) -> None:
     if not ai_enabled():
         return
@@ -591,6 +624,9 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
         return
 
     try:
+        max_events_per_run = int(os.getenv("AI_QUEUE_MAX_EVENTS_PER_RUN", "0"))
+        remaining_events = max_events_per_run if max_events_per_run > 0 else None
+
         trigger_event = (
             db.query(Event)
             .filter(
@@ -611,8 +647,13 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
             items = payload.get("items") or []
             _persist_items(db, user_id, items)
             events_to_mark_processed.append(trigger_event)
+            if remaining_events is not None:
+                remaining_events = max(remaining_events - 1, 0)
 
         # Rule 2: no screen recording and transcript exists -> batch infer.
+        batch_limit = 20
+        if remaining_events is not None:
+            batch_limit = max(min(20, remaining_events), 0)
         batch_events = (
             db.query(Event)
             .filter(
@@ -623,7 +664,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
                 Event.status.in_(["pending", "transcribing", "failed"]),
             )
             .order_by(Event.event_at.asc())
-            .limit(20)
+            .limit(batch_limit)
             .all()
         )
         if batch_events:
@@ -637,6 +678,10 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
         db.commit()
 
         trigger_daily_comments_generation(db, user_id, date_type.today(), manual=False)
+    except Exception as exc:
+        trigger_event_id = locals().get("trigger_event").id if locals().get("trigger_event") is not None else None
+        _record_ai_error(user_id, trigger_event_id, exc)
+        raise
     finally:
         _release_user_slot(user_id)
 

@@ -1,8 +1,13 @@
 # main.py
 
-from fastapi import FastAPI
+import os
+import time
+
+from fastapi import FastAPI, Header, HTTPException
 from sqlalchemy import inspect, text
 
+from auth import verify_token
+from ai_pipeline import get_ai_runtime_snapshot
 from database import engine
 from models import Base
 
@@ -18,6 +23,8 @@ app = FastAPI(
     title="Egg Backend",
     version="1.0"
 )
+APP_STARTED_AT = time.time()
+DEBUG_HEALTH_ENABLED = os.getenv("DEBUG_HEALTH_ENABLED", "0") == "1"
 
 
 @app.on_event("startup")
@@ -83,4 +90,36 @@ def health_check():
     return {
         "status": "ok",
         "service": "Egg Backend"
+    }
+
+
+@app.get("/v1/debug/health")
+def debug_health(authorization: str = Header(...)):
+    if not DEBUG_HEALTH_ENABLED:
+        raise HTTPException(404, "Not Found")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Invalid token")
+
+    token = authorization.replace("Bearer ", "", 1)
+    user_id = verify_token(token)
+
+    db_ok = True
+    db_error = None
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        db_ok = False
+        db_error = str(exc)[:500]
+
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "uptimeSec": round(time.time() - APP_STARTED_AT, 3),
+        "db": {
+            "ok": db_ok,
+            "dialect": engine.dialect.name,
+            "driver": engine.dialect.driver,
+            "error": db_error,
+        },
+        "aiQueue": get_ai_runtime_snapshot(user_id=user_id),
     }
