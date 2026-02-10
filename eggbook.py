@@ -80,12 +80,12 @@ class CommentGenerateRequest(BaseModel):
 def idea_to_dict(idea: EggbookIdea):
     return {
         "id": idea.id,
-        "sourceEventId": idea.source_event_id,
+        "source_event_id": idea.source_event_id,
         "title": idea.title,
         "content": idea.content,
-        "screenRecordingUrl": idea.screen_recording_url,
-        "recordingUrl": idea.recording_url,
-        "audioUrl": idea.audio_url,
+        "screen_recording_url": idea.screen_recording_url,
+        "audio_url": idea.audio_url,
+        "recording_url": idea.recording_url,
         "createdAt": idea.created_at.isoformat(),
         "updatedAt": idea.updated_at.isoformat()
     }
