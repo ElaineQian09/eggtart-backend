@@ -34,6 +34,7 @@ def create_tables():
     # Ensure newly added models are created in existing databases.
     Base.metadata.create_all(bind=engine)
     _migrate_eggbook_comments_columns()
+    _migrate_eggbook_ideas_columns()
     _migrate_events_columns()
 
 
@@ -68,6 +69,30 @@ def _migrate_events_columns():
         statements.append("ALTER TABLE events ADD COLUMN audio_url VARCHAR")
     if "screen_recording_url" not in existing_columns:
         statements.append("ALTER TABLE events ADD COLUMN screen_recording_url VARCHAR")
+
+    if not statements:
+        return
+
+    with engine.begin() as conn:
+        for stmt in statements:
+            conn.execute(text(stmt))
+
+
+def _migrate_eggbook_ideas_columns():
+    inspector = inspect(engine)
+    if "eggbook_ideas" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("eggbook_ideas")}
+    statements = []
+    if "source_event_id" not in existing_columns:
+        statements.append("ALTER TABLE eggbook_ideas ADD COLUMN source_event_id VARCHAR")
+    if "screen_recording_url" not in existing_columns:
+        statements.append("ALTER TABLE eggbook_ideas ADD COLUMN screen_recording_url VARCHAR")
+    if "recording_url" not in existing_columns:
+        statements.append("ALTER TABLE eggbook_ideas ADD COLUMN recording_url VARCHAR")
+    if "audio_url" not in existing_columns:
+        statements.append("ALTER TABLE eggbook_ideas ADD COLUMN audio_url VARCHAR")
 
     if not statements:
         return

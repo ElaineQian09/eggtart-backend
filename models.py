@@ -78,6 +78,10 @@ class EggbookIdea(Base):
 
     title = Column(String)
     content = Column(String)
+    source_event_id = Column(String, ForeignKey("events.id"), nullable=True)
+    screen_recording_url = Column(String, nullable=True)
+    recording_url = Column(String, nullable=True)
+    audio_url = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(

@@ -1,6 +1,7 @@
 # eggbook.py
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -79,8 +80,12 @@ class CommentGenerateRequest(BaseModel):
 def idea_to_dict(idea: EggbookIdea):
     return {
         "id": idea.id,
+        "sourceEventId": idea.source_event_id,
         "title": idea.title,
         "content": idea.content,
+        "screenRecordingUrl": idea.screen_recording_url,
+        "recordingUrl": idea.recording_url,
+        "audioUrl": idea.audio_url,
         "createdAt": idea.created_at.isoformat(),
         "updatedAt": idea.updated_at.isoformat()
     }
@@ -126,11 +131,34 @@ def comment_to_dict(comment: EggbookComment):
 @router.get("/v1/eggbook/sync-status")
 def get_sync_status(
     authorization: str = Header(...),
+    db: Session = Depends(get_db),
 ):
-    _ = get_user_id(authorization)
+    user_id = get_user_id(authorization)
+    pending_ideas = (
+        db.query(EggbookIdea)
+        .filter(
+            EggbookIdea.user_id == user_id,
+            or_(
+                EggbookIdea.title.is_(None),
+                EggbookIdea.title == "",
+                EggbookIdea.content.is_(None),
+                EggbookIdea.content == "",
+            ),
+        )
+        .count()
+    )
+    total_ideas = (
+        db.query(EggbookIdea)
+        .filter(EggbookIdea.user_id == user_id)
+        .count()
+    )
+    processing = pending_ideas > 0
+    has_updates = (not processing) and total_ideas > 0
     return {
         "status": "ok",
         "lastSyncAt": None,
+        "processing": processing,
+        "hasUpdates": has_updates,
     }
 
 

@@ -17,7 +17,7 @@ from ai_pipeline import (
     process_user_ai_queue,
 )
 from database import get_db
-from models import Device, Event
+from models import Device, Event, EggbookIdea
 from stt_client import stt_enabled, transcribe_audio_from_url
 
 
@@ -192,11 +192,8 @@ class EventUpdateRequest(BaseModel):
 def _stt_fill_transcript(event: Event, db: Session) -> None:
     if event.transcript:
         return
-    source_url = (
-        (event.audio_url or "").strip()
-        or (event.screen_recording_url or event.recording_url or "").strip()
-    )
-    if not source_url:
+    source_urls = _stt_source_urls(event)
+    if not source_urls:
         return
     if not stt_enabled():
         return
@@ -204,10 +201,32 @@ def _stt_fill_transcript(event: Event, db: Session) -> None:
     event.status = EVENT_STATUS_TRANSCRIBING
     db.commit()
 
-    transcript = transcribe_audio_from_url(source_url)
+    transcript = None
+    for source_url in source_urls:
+        try:
+            transcript = transcribe_audio_from_url(source_url)
+        except Exception:
+            logger.exception("STT failed for event %s using source %s", event.id, source_url)
+            continue
+        if transcript:
+            break
+
     if transcript:
         event.transcript = transcript
     db.commit()
+
+
+def _stt_source_urls(event: Event) -> list[str]:
+    candidates = [
+        (event.audio_url or "").strip(),
+        (event.screen_recording_url or "").strip(),
+        (event.recording_url or "").strip(),
+    ]
+    deduped = []
+    for url in candidates:
+        if url and url not in deduped:
+            deduped.append(url)
+    return deduped
 
 
 def _has_media_url(event: Event) -> bool:
@@ -234,26 +253,32 @@ def _run_pending_input_stt(db: Session, user_id: str) -> int:
     for candidate in events:
         if (candidate.transcript or "").strip():
             continue
-        source_url = (
-            (candidate.audio_url or "").strip()
-            or (candidate.screen_recording_url or candidate.recording_url or "").strip()
-        )
-        if not source_url:
+        source_urls = _stt_source_urls(candidate)
+        if not source_urls:
             continue
 
         candidate.status = EVENT_STATUS_TRANSCRIBING
         db.commit()
-        try:
-            transcript = transcribe_audio_from_url(source_url)
-        except Exception:
-            logger.exception("Batch STT failed for event %s", candidate.id)
-            candidate.status = EVENT_STATUS_FAILED
-            db.commit()
-            continue
+
+        transcript = None
+        for source_url in source_urls:
+            try:
+                transcript = transcribe_audio_from_url(source_url)
+            except Exception:
+                logger.exception(
+                    "Batch STT failed for event %s using source %s",
+                    candidate.id,
+                    source_url,
+                )
+                continue
+            if transcript:
+                break
 
         if transcript:
             candidate.transcript = transcript
             processed += 1
+        else:
+            candidate.status = EVENT_STATUS_FAILED
         db.commit()
     return processed
 
@@ -339,6 +364,31 @@ def update_event(
         event.status = infer_status(event.audio_url, screen_recording_url, event.transcript)
 
     db.commit()
+    # Create or refresh a placeholder idea for screen recordings.
+    screen_recording_url = event.screen_recording_url or event.recording_url
+    if screen_recording_url:
+        idea = (
+            db.query(EggbookIdea)
+            .filter(EggbookIdea.user_id == user_id, EggbookIdea.source_event_id == event.id)
+            .first()
+        )
+        if not idea:
+            idea = EggbookIdea(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                source_event_id=event.id,
+                title=None,
+                content=None,
+                screen_recording_url=screen_recording_url,
+                recording_url=event.recording_url,
+                audio_url=event.audio_url,
+            )
+            db.add(idea)
+        else:
+            idea.screen_recording_url = screen_recording_url
+            idea.recording_url = event.recording_url
+            idea.audio_url = event.audio_url
+        db.commit()
 
     # Trigger gate: by default, do not run AI on transcript-only patches.
     # This avoids duplicate AI runs when frontend PATCHes twice for one voice event
@@ -507,4 +557,53 @@ def debug_event_ai_state(
         },
         "runtime": runtime,
         "probableReason": probable_reason,
+    }
+
+
+@router.get("/v1/debug/events/{event_id}/linked-idea")
+def debug_event_linked_idea(
+    event_id: str,
+    authorization: str = Header(...),
+    db: Session = Depends(get_db),
+):
+    if not EVENT_DEBUG_ENABLED:
+        raise HTTPException(404, "Not Found")
+
+    user_id = get_user_id(authorization)
+    event = (
+        db.query(Event)
+        .filter(Event.id == event_id, Event.user_id == user_id)
+        .first()
+    )
+    if not event:
+        raise HTTPException(404, "Event not found")
+
+    idea = (
+        db.query(EggbookIdea)
+        .filter(EggbookIdea.user_id == user_id, EggbookIdea.source_event_id == event.id)
+        .first()
+    )
+    if not idea:
+        return {
+            "eventId": event.id,
+            "idea": None,
+        }
+
+    title = (idea.title or "").strip()
+    content = (idea.content or "").strip()
+    is_placeholder = not title and not content
+
+    return {
+        "eventId": event.id,
+        "idea": {
+            "id": idea.id,
+            "isPlaceholder": is_placeholder,
+            "title": idea.title,
+            "content": idea.content,
+            "screenRecordingUrl": idea.screen_recording_url,
+            "recordingUrl": idea.recording_url,
+            "audioUrl": idea.audio_url,
+            "createdAt": idea.created_at.isoformat(),
+            "updatedAt": idea.updated_at.isoformat(),
+        },
     }

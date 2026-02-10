@@ -151,25 +151,60 @@ def _screen_recording_url(event: Event) -> str:
     return (event.screen_recording_url or event.recording_url or "").strip()
 
 
-def _persist_items(db: Session, user_id: str, items: List[Dict[str, Any]]) -> int:
+def _persist_items(
+    db: Session,
+    user_id: str,
+    items: List[Dict[str, Any]],
+    source_event: Event | None = None,
+) -> int:
     created = 0
     now = datetime.utcnow()
+    idea_written = False
     for item in items:
         idea_title = _safe_text(item.get("scrolling_idea_title"))
         idea_detail = _safe_text(item.get("scrolling_idea_detail"))
         todo_item = _safe_text(item.get("todo_item"))
         alert = _safe_text(item.get("alert"))
 
-        if idea_title or idea_detail:
-            db.add(
-                EggbookIdea(
-                    id=str(uuid.uuid4()),
-                    user_id=user_id,
-                    title=idea_title or None,
-                    content=idea_detail or idea_title,
+        if (idea_title or idea_detail) and (source_event is None or not idea_written):
+            if source_event is not None:
+                idea = (
+                    db.query(EggbookIdea)
+                    .filter(
+                        EggbookIdea.user_id == user_id,
+                        EggbookIdea.source_event_id == source_event.id,
+                    )
+                    .first()
                 )
-            )
-            created += 1
+                if not idea:
+                    idea = EggbookIdea(
+                        id=str(uuid.uuid4()),
+                        user_id=user_id,
+                        source_event_id=source_event.id,
+                        title=None,
+                        content=None,
+                        screen_recording_url=_screen_recording_url(source_event) or None,
+                        recording_url=source_event.recording_url,
+                        audio_url=source_event.audio_url,
+                    )
+                    db.add(idea)
+                    created += 1
+                idea.title = idea_title or None
+                idea.content = idea_detail or idea_title
+                idea.screen_recording_url = _screen_recording_url(source_event) or None
+                idea.recording_url = source_event.recording_url
+                idea.audio_url = source_event.audio_url
+                idea_written = True
+            else:
+                db.add(
+                    EggbookIdea(
+                        id=str(uuid.uuid4()),
+                        user_id=user_id,
+                        title=idea_title or None,
+                        content=idea_detail or idea_title,
+                    )
+                )
+                created += 1
         if todo_item:
             db.add(
                 EggbookTodo(
@@ -662,7 +697,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
         if _screen_recording_url(trigger_event) and trigger_event.status != "processed":
             payload = _call_gemini_json(_build_items_prompt([trigger_event], single_mode=True))
             items = payload.get("items") or []
-            _persist_items(db, user_id, items)
+            _persist_items(db, user_id, items, source_event=trigger_event)
             events_to_mark_processed.append(trigger_event)
             if remaining_events is not None:
                 remaining_events = max(remaining_events - 1, 0)
