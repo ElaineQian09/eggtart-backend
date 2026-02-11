@@ -423,6 +423,14 @@ def _cleanup_old_comment_data(db: Session, user_id: str, keep_days: int = 7) -> 
     db.commit()
 
 
+def _clear_daily_comments(db: Session, user_id: str, target_date: date_type) -> None:
+    (
+        db.query(EggbookComment)
+        .filter(EggbookComment.user_id == user_id, EggbookComment.date == target_date)
+        .delete(synchronize_session=False)
+    )
+
+
 def _get_or_create_comment_state(db: Session, user_id: str, target_date: date_type) -> EggbookCommentGeneration:
     state = (
         db.query(EggbookCommentGeneration)
@@ -562,6 +570,8 @@ def trigger_daily_comments_generation(
 
     try:
         comments_payload = _call_gemini_json(_build_comments_prompt(ideas, todos, alerts))
+        # Replace strategy: one latest generated comment set per user per day.
+        _clear_daily_comments(db, user_id, target_date)
         my_comment = _safe_text(comments_payload.get("my_egg_comment"))
         _upsert_comment(db, user_id, my_comment, target_date, False)
 
