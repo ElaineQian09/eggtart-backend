@@ -3,7 +3,7 @@ import logging
 import os
 import time
 import uuid
-from datetime import date as date_type, datetime, timedelta
+from datetime import date as date_type, datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Dict, List
 
@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from models import (
     EggbookComment,
     EggbookCommentGeneration,
+    Device,
     EggbookIdea,
     EggbookNotification,
     EggbookTodo,
@@ -151,6 +152,43 @@ def _screen_recording_url(event: Event) -> str:
     return (event.screen_recording_url or event.recording_url or "").strip()
 
 
+def _iso_utc(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _get_user_timezone_hint(db: Session, user_id: str) -> str:
+    row = (
+        db.query(Device.timezone)
+        .filter(Device.user_id == user_id, Device.timezone.is_not(None), Device.timezone != "")
+        .order_by(Device.created_at.desc())
+        .first()
+    )
+    if not row:
+        return "UTC"
+    return str(row[0]).strip() or "UTC"
+
+
+def _build_time_context(now_utc: datetime, user_timezone: str) -> str:
+    now_iso = _iso_utc(now_utc) or ""
+    return (
+        "Time reference (critical):\n"
+        f"- current_time_utc: {now_iso}\n"
+        f"- user_timezone_hint: {user_timezone}\n"
+        "- Treat event_at as UTC when no timezone offset is present.\n"
+        "- Resolve relative time expressions (today, tomorrow, tonight, next Monday, in 2 hours) "
+        "against current_time_utc + user_timezone_hint.\n"
+        "- For any time-sensitive todo/alert, write an explicit absolute time in the text using "
+        "YYYY-MM-DD HH:MM plus timezone (or UTC when unsure).\n"
+        "- Never leave a deadline/reminder as only a relative phrase when it can be resolved.\n"
+    )
+
+
 def _persist_items(
     db: Session,
     user_id: str,
@@ -231,11 +269,16 @@ def _persist_items(
     return created
 
 
-def _build_items_prompt(events: List[Event], single_mode: bool) -> str:
+def _build_items_prompt(
+    events: List[Event],
+    single_mode: bool,
+    now_utc: datetime,
+    user_timezone: str,
+) -> str:
     serialized = [
         {
             "event_id": e.id,
-            "event_at": e.event_at.isoformat() if e.event_at else None,
+            "event_at": _iso_utc(e.event_at),
             "audio_url": e.audio_url,
             "screen_recording_url": _screen_recording_url(e),
             "recording_url": e.recording_url,
@@ -264,12 +307,14 @@ def _build_items_prompt(events: List[Event], single_mode: bool) -> str:
             "}\n"
             "Field meanings and rules:\n"
             "- scrolling_idea_title: short headline for a potentially valuable idea from this event.\n"
-            "- scrolling_idea_detail: concise explanation of that idea; include context and intent.\n"
+            "- scrolling_idea_detail: detailed explanation of that idea (at least 3 sentences).\n"
+            "- scrolling_idea_detail must include: why it matters, supporting evidence from input, and a practical next step.\n"
             "- todo_item: one concrete, executable next action; keep imperative and specific.\n"
             "- alert: important risk/reminder/deadline to surface prominently.\n"
             "- If a field has no meaningful content, use empty string.\n"
             "- You may output multiple items if the event contains multiple independent thoughts.\n"
             "- Preserve original language tone when possible.\n"
+            f"{_build_time_context(now_utc, user_timezone)}"
             f"Input event JSON:\n{json.dumps(serialized, ensure_ascii=True)}"
         )
 
@@ -292,12 +337,14 @@ def _build_items_prompt(events: List[Event], single_mode: bool) -> str:
         "}\n"
         "Field meanings and rules:\n"
         "- scrolling_idea_title: short headline for a synthesized idea across events.\n"
-        "- scrolling_idea_detail: compact detail that combines relevant evidence from the event set.\n"
+        "- scrolling_idea_detail: detailed synthesis (at least 3 sentences) that combines relevant evidence from the event set.\n"
+        "- scrolling_idea_detail must include: key context, why this matters now, and a practical direction or next step.\n"
         "- todo_item: concrete next action derived from the strongest actionable signal.\n"
         "- alert: urgent caution, conflict, or time-sensitive reminder detected in the batch.\n"
         "- If a field has no meaningful content, use empty string.\n"
         "- Prefer fewer, higher-quality items instead of repeating similar items.\n"
         "- Do not invent facts that are not grounded in the input events.\n"
+        f"{_build_time_context(now_utc, user_timezone)}"
         f"Input events JSON:\n{json.dumps(serialized, ensure_ascii=True)}"
     )
 
@@ -306,18 +353,20 @@ def _build_comments_prompt(
     ideas: List[EggbookIdea],
     todos: List[EggbookTodo],
     alerts: List[EggbookNotification],
+    now_utc: datetime,
+    user_timezone: str,
 ) -> str:
     payload = {
         "ideas": [
-            {"title": i.title, "detail": i.content, "created_at": i.created_at.isoformat()}
+            {"title": i.title, "detail": i.content, "created_at": _iso_utc(i.created_at)}
             for i in ideas
         ],
         "todos": [
-            {"title": t.title, "isAccepted": bool(t.is_accepted), "updated_at": t.updated_at.isoformat()}
+            {"title": t.title, "isAccepted": bool(t.is_accepted), "updated_at": _iso_utc(t.updated_at)}
             for t in todos
         ],
         "alerts": [
-            {"alert": a.title, "notify_at": a.notify_at.isoformat()}
+            {"alert": a.title, "notify_at": _iso_utc(a.notify_at)}
             for a in alerts
         ],
     }
@@ -357,6 +406,7 @@ def _build_comments_prompt(
         "}\n"
         "\n"
         "Now generate comments based on today's context.\n"
+        f"{_build_time_context(now_utc, user_timezone)}"
         f"Input JSON:\n{json.dumps(payload, ensure_ascii=True)}"
     )
 
@@ -518,6 +568,8 @@ def trigger_daily_comments_generation(
     target_date: date_type,
     manual: bool = False,
 ) -> Dict[str, Any]:
+    now_utc = datetime.now(timezone.utc)
+    user_timezone = _get_user_timezone_hint(db, user_id)
     _cleanup_old_comment_data(db, user_id)
     state = _get_or_create_comment_state(db, user_id, target_date)
     has_input, active_duration_sec = _get_daily_input_stats(db, user_id, target_date)
@@ -569,7 +621,15 @@ def trigger_daily_comments_generation(
         return get_comment_generation_state(db, user_id, target_date)
 
     try:
-        comments_payload = _call_gemini_json(_build_comments_prompt(ideas, todos, alerts))
+        comments_payload = _call_gemini_json(
+            _build_comments_prompt(
+                ideas,
+                todos,
+                alerts,
+                now_utc=now_utc,
+                user_timezone=user_timezone,
+            )
+        )
         # Replace strategy: one latest generated comment set per user per day.
         _clear_daily_comments(db, user_id, target_date)
         my_comment = _safe_text(comments_payload.get("my_egg_comment"))
@@ -686,6 +746,8 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
         return
 
     try:
+        now_utc = datetime.now(timezone.utc)
+        user_timezone = _get_user_timezone_hint(db, user_id)
         max_events_per_run = int(os.getenv("AI_QUEUE_MAX_EVENTS_PER_RUN", "0"))
         remaining_events = max_events_per_run if max_events_per_run > 0 else None
 
@@ -705,7 +767,14 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
 
         # Rule 1: screen recording exists -> infer this event independently.
         if _screen_recording_url(trigger_event) and trigger_event.status != "processed":
-            payload = _call_gemini_json(_build_items_prompt([trigger_event], single_mode=True))
+            payload = _call_gemini_json(
+                _build_items_prompt(
+                    [trigger_event],
+                    single_mode=True,
+                    now_utc=now_utc,
+                    user_timezone=user_timezone,
+                )
+            )
             items = payload.get("items") or []
             _persist_items(db, user_id, items, source_event=trigger_event)
             events_to_mark_processed.append(trigger_event)
@@ -730,7 +799,14 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
             .all()
         )
         if batch_events:
-            payload = _call_gemini_json(_build_items_prompt(batch_events, single_mode=False))
+            payload = _call_gemini_json(
+                _build_items_prompt(
+                    batch_events,
+                    single_mode=False,
+                    now_utc=now_utc,
+                    user_timezone=user_timezone,
+                )
+            )
             items = payload.get("items") or []
             _persist_items(db, user_id, items)
             events_to_mark_processed.extend(batch_events)
