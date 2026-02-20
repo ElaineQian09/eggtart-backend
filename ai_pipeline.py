@@ -1,11 +1,13 @@
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy.orm import Session
@@ -189,10 +191,76 @@ def _build_time_context(now_utc: datetime, user_timezone: str) -> str:
     )
 
 
+def _user_tzinfo(user_timezone: str):
+    tz_name = (user_timezone or "").strip() or "UTC"
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return timezone.utc
+
+
+def _to_utc_naive(dt: datetime, user_timezone: str) -> datetime:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_user_tzinfo(user_timezone))
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _parse_notify_at_text(value: Any, user_timezone: str) -> datetime | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+
+    # Prefer strict ISO timestamps from model output.
+    iso_candidate = text.replace("Z", "+00:00")
+    try:
+        return _to_utc_naive(datetime.fromisoformat(iso_candidate), user_timezone)
+    except Exception:
+        pass
+
+    # Fallback: parse explicit datetime in text like "2026-02-22 20:00 UTC".
+    m = re.search(
+        r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)\s*(UTC|Z|[+-]\d{2}:?\d{2})?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m:
+        return None
+
+    date_part = m.group(1)
+    time_part = m.group(2)
+    tz_part = (m.group(3) or "").upper()
+    dt_part = f"{date_part} {time_part}"
+    fmt = "%Y-%m-%d %H:%M:%S" if len(time_part) == 8 else "%Y-%m-%d %H:%M"
+    try:
+        dt = datetime.strptime(dt_part, fmt)
+    except Exception:
+        return None
+
+    if tz_part in ["UTC", "Z"]:
+        return dt
+    if tz_part:
+        normalized = tz_part if ":" in tz_part else f"{tz_part[:3]}:{tz_part[3:]}"
+        try:
+            offset_dt = datetime.fromisoformat(f"{date_part}T{time_part}{normalized}")
+            return _to_utc_naive(offset_dt, user_timezone)
+        except Exception:
+            return _to_utc_naive(dt, user_timezone)
+    return _to_utc_naive(dt, user_timezone)
+
+
+def _extract_alert_notify_at(item: Dict[str, Any], alert_text: str, user_timezone: str) -> datetime | None:
+    for key in ["alert_notify_at_utc", "alert_notify_at", "alert_at_utc", "alert_at"]:
+        parsed = _parse_notify_at_text(item.get(key), user_timezone)
+        if parsed is not None:
+            return parsed
+    return _parse_notify_at_text(alert_text, user_timezone)
+
+
 def _persist_items(
     db: Session,
     user_id: str,
     items: List[Dict[str, Any]],
+    user_timezone: str,
     source_event: Event | None = None,
 ) -> int:
     created = 0
@@ -255,6 +323,7 @@ def _persist_items(
             )
             created += 1
         if alert:
+            notify_at = _extract_alert_notify_at(item, alert, user_timezone) or now
             # Reuse notification table to persist alert text.
             db.add(
                 EggbookNotification(
@@ -262,7 +331,7 @@ def _persist_items(
                     user_id=user_id,
                     todo_id=None,
                     title=alert,
-                    notify_at=now,
+                    notify_at=notify_at,
                 )
             )
             created += 1
@@ -301,7 +370,8 @@ def _build_items_prompt(
             '      "scrolling_idea_title": "string",\n'
             '      "scrolling_idea_detail": "string",\n'
             '      "todo_item": "string",\n'
-            '      "alert": "string"\n'
+            '      "alert": "string",\n'
+            '      "alert_notify_at_utc": "string"\n'
             "    }\n"
             "  ]\n"
             "}\n"
@@ -311,6 +381,10 @@ def _build_items_prompt(
             "- scrolling_idea_detail must include: why it matters, supporting evidence from input, and a practical next step.\n"
             "- todo_item: one concrete, executable next action; keep imperative and specific.\n"
             "- alert: important risk/reminder/deadline to surface prominently.\n"
+            "- alert_notify_at_utc: if the user mentions a specific/relative reminder time (e.g. "
+            '"in 2 days at 8pm", "tomorrow morning"), resolve it using current_time_utc + user_timezone_hint '
+            'and output absolute UTC ISO8601 (example: "2026-02-22T04:00:00Z"). Otherwise empty string.\n'
+            "- If there is a clear reminder time in the input, alert must not be empty.\n"
             "- If a field has no meaningful content, use empty string.\n"
             "- You may output multiple items if the event contains multiple independent thoughts.\n"
             "- Preserve original language tone when possible.\n"
@@ -331,7 +405,8 @@ def _build_items_prompt(
         '      "scrolling_idea_title": "string",\n'
         '      "scrolling_idea_detail": "string",\n'
         '      "todo_item": "string",\n'
-        '      "alert": "string"\n'
+        '      "alert": "string",\n'
+        '      "alert_notify_at_utc": "string"\n'
         "    }\n"
         "  ]\n"
         "}\n"
@@ -341,6 +416,10 @@ def _build_items_prompt(
         "- scrolling_idea_detail must include: key context, why this matters now, and a practical direction or next step.\n"
         "- todo_item: concrete next action derived from the strongest actionable signal.\n"
         "- alert: urgent caution, conflict, or time-sensitive reminder detected in the batch.\n"
+        "- alert_notify_at_utc: if the user mentions a specific/relative reminder time, resolve it "
+        'using current_time_utc + user_timezone_hint and output absolute UTC ISO8601 (example: "2026-02-22T04:00:00Z"). '
+        "Otherwise empty string.\n"
+        "- If there is a clear reminder time in the input, alert must not be empty.\n"
         "- If a field has no meaningful content, use empty string.\n"
         "- Prefer fewer, higher-quality items instead of repeating similar items.\n"
         "- Do not invent facts that are not grounded in the input events.\n"
@@ -776,7 +855,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
                 )
             )
             items = payload.get("items") or []
-            _persist_items(db, user_id, items, source_event=trigger_event)
+            _persist_items(db, user_id, items, user_timezone=user_timezone, source_event=trigger_event)
             events_to_mark_processed.append(trigger_event)
             if remaining_events is not None:
                 remaining_events = max(remaining_events - 1, 0)
@@ -808,7 +887,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
                 )
             )
             items = payload.get("items") or []
-            _persist_items(db, user_id, items)
+            _persist_items(db, user_id, items, user_timezone=user_timezone)
             events_to_mark_processed.extend(batch_events)
 
         for event in events_to_mark_processed:
