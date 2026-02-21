@@ -163,6 +163,42 @@ Response:
 
 ---
 
+## Egg Book / Sync
+
+GET /v1/eggbook/sync-status
+Response:
+{
+  "status": "ok",
+  "lastSyncAt": null,
+  "processing": true,
+  "hasUpdates": false
+}
+
+WS /v1/eggbook/ws?token=<jwt>
+- Auth: query `token` or `Authorization: Bearer <token>` header
+- Server pushes event text JSON envelope:
+{
+  "type": "eggbook.sync",
+  "version": 1,
+  "eventId": "uuid",
+  "timestamp": "2026-02-20T12:34:56Z",
+  "data": {
+    "processing": true,
+    "updates": false,
+    "reason": "event_queued | ai_processing_started | ai_processing_done | eggbook_materialized | error",
+    "sourceEventId": "optional-event-id",
+    "updatedTabs": ["ideas", "todos", "notifications", "comments"]
+  }
+}
+
+GET /v1/eggbook/stream
+- Auth: query `token` or `Authorization: Bearer <token>` header
+- Response `text/event-stream`
+- Event name: `eggbook.sync`
+- Data payload is the same JSON envelope as WS.
+
+---
+
 ## Egg Book / Ideas
 
 GET /v1/eggbook/ideas

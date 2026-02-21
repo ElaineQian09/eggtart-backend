@@ -63,6 +63,8 @@ Debug flags:
 - `PATCH /v1/events/{id}`
 - `GET /v1/events/{id}/status`
 - `GET /v1/eggbook/sync-status`
+- `GET /v1/eggbook/stream` (SSE)
+- `WS /v1/eggbook/ws`
 - `POST /v1/eggbook/comments/generate`
 
 Debug (when enabled):

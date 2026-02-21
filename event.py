@@ -17,6 +17,7 @@ from ai_pipeline import (
     process_user_ai_queue,
 )
 from database import get_db
+from eggbook_sync_push import publish_eggbook_sync_event
 from models import Device, Event, EggbookIdea
 from stt_client import stt_enabled, transcribe_audio_from_url
 
@@ -400,6 +401,14 @@ def update_event(
         payload["eventId"] = event.id
         return payload
 
+    publish_eggbook_sync_event(
+        user_id=user_id,
+        processing=True,
+        updates=False,
+        reason="event_queued",
+        source_event_id=event.id,
+    )
+
     pending_input_count = _count_pending_input_candidates(db, user_id)
     oldest_pending_input_at = _oldest_pending_input_event_at(db, user_id)
     batch_wait_exceeded = False
@@ -432,6 +441,13 @@ def update_event(
         logger.exception("STT failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
+        publish_eggbook_sync_event(
+            user_id=user_id,
+            processing=False,
+            updates=False,
+            reason="error",
+            source_event_id=event.id,
+        )
         payload = event_to_dict(event)
         payload["eventId"] = event.id
         return payload
@@ -439,12 +455,26 @@ def update_event(
     if not ai_enabled():
         event.status = EVENT_STATUS_PENDING
         db.commit()
+        publish_eggbook_sync_event(
+            user_id=user_id,
+            processing=False,
+            updates=False,
+            reason="error",
+            source_event_id=event.id,
+        )
         payload = event_to_dict(event)
         payload["eventId"] = event.id
         return payload
 
     try:
-        process_user_ai_queue(db, user_id)
+        publish_eggbook_sync_event(
+            user_id=user_id,
+            processing=True,
+            updates=False,
+            reason="ai_processing_started",
+            source_event_id=event.id,
+        )
+        ai_result = process_user_ai_queue(db, user_id)
     except (GeminiRateLimitError, GeminiTransientError):
         logger.warning("AI transient error for event %s, keeping status for retry", event.id)
         event.status = EVENT_STATUS_TRANSCRIBING
@@ -453,8 +483,25 @@ def update_event(
         logger.exception("AI processing failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
+        publish_eggbook_sync_event(
+            user_id=user_id,
+            processing=False,
+            updates=False,
+            reason="error",
+            source_event_id=event.id,
+        )
     else:
         db.refresh(event)
+        updated_tabs = ai_result.get("updatedTabs") or []
+        has_updates = bool(ai_result.get("hasUpdates"))
+        publish_eggbook_sync_event(
+            user_id=user_id,
+            processing=False,
+            updates=has_updates,
+            reason="eggbook_materialized" if has_updates else "ai_processing_done",
+            source_event_id=event.id,
+            updated_tabs=updated_tabs,
+        )
 
     payload = event_to_dict(event)
     payload["eventId"] = event.id

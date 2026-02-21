@@ -1,6 +1,9 @@
 # eggbook.py
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+import asyncio
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -11,6 +14,7 @@ import uuid
 from database import get_db
 from auth import verify_token
 from ai_pipeline import get_comment_generation_state, trigger_daily_comments_generation
+from eggbook_sync_push import get_eggbook_sync_broker
 from models import (
     EggbookIdea,
     EggbookTodo,
@@ -20,6 +24,7 @@ from models import (
 
 
 router = APIRouter()
+sync_broker = get_eggbook_sync_broker()
 
 
 def get_user_id(authorization: str) -> str:
@@ -27,6 +32,25 @@ def get_user_id(authorization: str) -> str:
         raise HTTPException(401, "Invalid token")
     token = authorization.replace("Bearer ", "")
     return verify_token(token)
+
+
+def _extract_token_from_ws(websocket: WebSocket) -> str:
+    token = websocket.query_params.get("token")
+    if token:
+        return token
+    auth_header = websocket.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header.replace("Bearer ", "", 1)
+    return ""
+
+
+def _extract_token_from_header_or_query(authorization: Optional[str], token: Optional[str]) -> str:
+    if token:
+        return token
+    auth_header = authorization or ""
+    if auth_header.startswith("Bearer "):
+        return auth_header.replace("Bearer ", "", 1)
+    return ""
 
 
 class IdeaCreateRequest(BaseModel):
@@ -160,6 +184,59 @@ def get_sync_status(
         "processing": processing,
         "hasUpdates": has_updates,
     }
+
+
+@router.websocket("/v1/eggbook/ws")
+async def eggbook_sync_ws(websocket: WebSocket):
+    token = _extract_token_from_ws(websocket)
+    if not token:
+        await websocket.close(code=4401, reason="Missing auth token")
+        return
+
+    try:
+        user_id = verify_token(token)
+    except HTTPException:
+        await websocket.close(code=4401, reason="Invalid auth token")
+        return
+
+    await websocket.accept()
+    await sync_broker.register_ws(user_id, websocket)
+    try:
+        while True:
+            _ = await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await sync_broker.unregister_ws(user_id, websocket)
+
+
+@router.get("/v1/eggbook/stream")
+async def eggbook_sync_stream(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    token: Optional[str] = Query(default=None),
+):
+    raw_token = _extract_token_from_header_or_query(authorization, token)
+    if not raw_token:
+        raise HTTPException(401, "Missing auth token")
+
+    user_id = verify_token(raw_token)
+    queue = await sync_broker.register_sse(user_id)
+
+    async def event_generator():
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=15)
+                    yield f"event: eggbook.sync\ndata: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+        finally:
+            await sync_broker.unregister_sse(user_id, queue)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get("/v1/eggbook/ideas")

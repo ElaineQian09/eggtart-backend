@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
 from threading import Lock
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -262,10 +262,11 @@ def _persist_items(
     items: List[Dict[str, Any]],
     user_timezone: str,
     source_event: Event | None = None,
-) -> int:
+) -> Tuple[int, Set[str]]:
     created = 0
     now = datetime.utcnow()
     idea_written = False
+    updated_tabs: Set[str] = set()
     for item in items:
         idea_title = _safe_text(item.get("scrolling_idea_title"))
         idea_detail = _safe_text(item.get("scrolling_idea_detail"))
@@ -301,6 +302,7 @@ def _persist_items(
                 idea.recording_url = source_event.recording_url
                 idea.audio_url = source_event.audio_url
                 idea_written = True
+                updated_tabs.add("ideas")
             else:
                 db.add(
                     EggbookIdea(
@@ -311,6 +313,7 @@ def _persist_items(
                     )
                 )
                 created += 1
+                updated_tabs.add("ideas")
         if todo_item:
             db.add(
                 EggbookTodo(
@@ -322,6 +325,7 @@ def _persist_items(
                 )
             )
             created += 1
+            updated_tabs.add("todos")
         if alert:
             notify_at = _extract_alert_notify_at(item, alert, user_timezone) or now
             # Reuse notification table to persist alert text.
@@ -335,7 +339,8 @@ def _persist_items(
                 )
             )
             created += 1
-    return created
+            updated_tabs.add("notifications")
+    return created, updated_tabs
 
 
 def _build_items_prompt(
@@ -816,19 +821,28 @@ def get_ai_runtime_snapshot(user_id: str | None = None) -> Dict[str, Any]:
     return snapshot
 
 
-def process_user_ai_queue(db: Session, user_id: str) -> None:
+def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
     if not ai_enabled():
-        return
+        return {
+            "processedEventCount": 0,
+            "updatedTabs": [],
+            "hasUpdates": False,
+        }
 
     if not _acquire_user_slot(user_id):
         logger.info("Skip AI run: user slot busy/cooldown, user_id=%s", user_id)
-        return
+        return {
+            "processedEventCount": 0,
+            "updatedTabs": [],
+            "hasUpdates": False,
+        }
 
     try:
         now_utc = datetime.now(timezone.utc)
         user_timezone = _get_user_timezone_hint(db, user_id)
         max_events_per_run = int(os.getenv("AI_QUEUE_MAX_EVENTS_PER_RUN", "0"))
         remaining_events = max_events_per_run if max_events_per_run > 0 else None
+        updated_tabs: Set[str] = set()
 
         trigger_event = (
             db.query(Event)
@@ -840,7 +854,11 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
             .first()
         )
         if not trigger_event:
-            return
+            return {
+                "processedEventCount": 0,
+                "updatedTabs": [],
+                "hasUpdates": False,
+            }
 
         events_to_mark_processed: List[Event] = []
 
@@ -855,7 +873,14 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
                 )
             )
             items = payload.get("items") or []
-            _persist_items(db, user_id, items, user_timezone=user_timezone, source_event=trigger_event)
+            _, single_tabs = _persist_items(
+                db,
+                user_id,
+                items,
+                user_timezone=user_timezone,
+                source_event=trigger_event,
+            )
+            updated_tabs.update(single_tabs)
             events_to_mark_processed.append(trigger_event)
             if remaining_events is not None:
                 remaining_events = max(remaining_events - 1, 0)
@@ -887,14 +912,27 @@ def process_user_ai_queue(db: Session, user_id: str) -> None:
                 )
             )
             items = payload.get("items") or []
-            _persist_items(db, user_id, items, user_timezone=user_timezone)
+            _, batch_tabs = _persist_items(
+                db,
+                user_id,
+                items,
+                user_timezone=user_timezone,
+            )
+            updated_tabs.update(batch_tabs)
             events_to_mark_processed.extend(batch_events)
 
         for event in events_to_mark_processed:
             event.status = "processed"
         db.commit()
 
-        trigger_daily_comments_generation(db, user_id, date_type.today(), manual=False)
+        comments_state = trigger_daily_comments_generation(db, user_id, date_type.today(), manual=False)
+        if comments_state.get("status") == COMMENT_STATUS_READY:
+            updated_tabs.add("comments")
+        return {
+            "processedEventCount": len(events_to_mark_processed),
+            "updatedTabs": sorted(updated_tabs),
+            "hasUpdates": bool(updated_tabs),
+        }
     except Exception as exc:
         trigger_event_id = locals().get("trigger_event").id if locals().get("trigger_event") is not None else None
         _record_ai_error(user_id, trigger_event_id, exc)
