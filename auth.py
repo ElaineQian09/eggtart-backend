@@ -14,9 +14,18 @@ from typing import Optional
 
 router = APIRouter()
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-this-in-production-32bytes-minimum")
+_DEFAULT_JWT_SECRET = "change-this-in-production-32bytes-minimum"
+SECRET_KEY = (
+    os.getenv("JWT_SECRET_KEY")
+    or os.getenv("JWT_SECRET")
+    or _DEFAULT_JWT_SECRET
+)
 ALGORITHM = "HS256"
 DEBUG_DEVICE_LOOKUP_ENABLED = os.getenv("DEBUG_DEVICE_LOOKUP_ENABLED", "0") == "1"
+
+
+def jwt_secret_is_default() -> bool:
+    return SECRET_KEY == _DEFAULT_JWT_SECRET
 
 
 def create_token(user_id: str):

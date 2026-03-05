@@ -2,23 +2,24 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from auth import verify_token
+from database import get_db
+from models import UploadSession
 
 
 router = APIRouter()
 
 UPLOAD_EXPIRES_MINUTES = int(os.getenv("UPLOAD_EXPIRES_MINUTES", "15"))
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/tmp/egg_uploads"))
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# In-memory signed upload sessions for MVP/testing.
-_UPLOAD_SESSIONS: Dict[str, Dict[str, str]] = {}
 
 
 def get_user_id(authorization: str) -> str:
@@ -48,11 +49,18 @@ def _safe_ext(content_type: str, filename: Optional[str]) -> str:
     return "bin"
 
 
+def _public_base(request: Request) -> str:
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    return str(request.base_url).rstrip("/")
+
+
 @router.post("/v1/uploads/recording")
 def create_recording_upload(
     req: UploadRecordingRequest,
     request: Request,
     authorization: str = Header(...),
+    db: Session = Depends(get_db),
 ):
     user_id = get_user_id(authorization)
     now = datetime.now(timezone.utc)
@@ -64,15 +72,18 @@ def create_recording_upload(
     file_name = f"{upload_id}.{ext}"
     file_path = str((UPLOAD_DIR / file_name).resolve())
 
-    _UPLOAD_SESSIONS[upload_id] = {
-        "token": upload_token,
-        "user_id": user_id,
-        "content_type": req.content_type,
-        "expires_at": expires_at.isoformat(),
-        "file_path": file_path,
-    }
+    session = UploadSession(
+        id=upload_id,
+        user_id=user_id,
+        upload_token=upload_token,
+        content_type=req.content_type,
+        file_path=file_path,
+        expires_at=expires_at.replace(tzinfo=None),
+    )
+    db.add(session)
+    db.commit()
 
-    base = str(request.base_url).rstrip("/")
+    base = _public_base(request)
     upload_url = f"{base}/v1/uploads/recording/{upload_id}?token={upload_token}"
     file_url = f"{base}/v1/uploads/files/{upload_id}"
 
@@ -88,34 +99,39 @@ async def upload_recording_file(
     upload_id: str,
     request: Request,
     token: str,
+    db: Session = Depends(get_db),
 ):
-    session = _UPLOAD_SESSIONS.get(upload_id)
+    session = db.query(UploadSession).filter(UploadSession.id == upload_id).first()
     if not session:
         raise HTTPException(404, "Upload session not found")
-    if token != session["token"]:
+    if token != session.upload_token:
         raise HTTPException(403, "Invalid upload token")
 
-    expires_at = datetime.fromisoformat(session["expires_at"])
+    expires_at = session.expires_at.replace(tzinfo=timezone.utc)
     if datetime.now(timezone.utc) > expires_at:
-        _UPLOAD_SESSIONS.pop(upload_id, None)
+        db.delete(session)
+        db.commit()
         raise HTTPException(410, "Upload URL expired")
 
     body = await request.body()
     if not body:
         raise HTTPException(400, "Empty upload body")
 
-    with open(session["file_path"], "wb") as f:
+    with open(session.file_path, "wb") as f:
         f.write(body)
 
-    return {"message": "Upload completed", "fileUrl": f"/v1/uploads/files/{upload_id}"}
+    return {
+        "message": "Upload completed",
+        "fileUrl": f"{_public_base(request)}/v1/uploads/files/{upload_id}",
+    }
 
 
 @router.get("/v1/uploads/files/{upload_id}")
-def get_uploaded_file(upload_id: str):
-    session = _UPLOAD_SESSIONS.get(upload_id)
+def get_uploaded_file(upload_id: str, db: Session = Depends(get_db)):
+    session = db.query(UploadSession).filter(UploadSession.id == upload_id).first()
     if not session:
         raise HTTPException(404, "File not found")
-    file_path = session["file_path"]
+    file_path = session.file_path
     if not os.path.exists(file_path):
         raise HTTPException(404, "File not found")
-    return FileResponse(path=file_path, media_type=session["content_type"])
+    return FileResponse(path=file_path, media_type=session.content_type)

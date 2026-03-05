@@ -6,7 +6,7 @@ import time
 from fastapi import FastAPI, Header, HTTPException, Query
 from sqlalchemy import inspect, text
 
-from auth import verify_token
+from auth import jwt_secret_is_default, verify_token
 from ai_pipeline import get_ai_runtime_snapshot
 from database import engine
 from models import Base
@@ -31,6 +31,7 @@ DEBUG_RESET_KEY = os.getenv("DEBUG_RESET_KEY", "")
 
 @app.on_event("startup")
 def create_tables():
+    _validate_runtime_config()
     # Ensure newly added models are created in existing databases.
     Base.metadata.create_all(bind=engine)
     _migrate_eggbook_comments_columns()
@@ -100,6 +101,15 @@ def _migrate_eggbook_ideas_columns():
     with engine.begin() as conn:
         for stmt in statements:
             conn.execute(text(stmt))
+
+
+def _validate_runtime_config():
+    app_env = os.getenv("APP_ENV", "development").strip().lower()
+    is_production = app_env in {"prod", "production"}
+    if is_production and jwt_secret_is_default():
+        raise RuntimeError(
+            "JWT secret is using default value. Set JWT_SECRET_KEY in production."
+        )
 
 
 app.include_router(auth_router)

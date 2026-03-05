@@ -28,12 +28,15 @@ Server starts at `http://127.0.0.1:8000` by default.
 
 Core:
 - `DATABASE_URL` (optional; defaults to local SQLite)
-- `JWT_SECRET`
+- `JWT_SECRET_KEY` (preferred; `JWT_SECRET` kept for compatibility)
 - `GEMINI_API_KEY`
 - `GEMINI_MODEL`
+- `APP_ENV` (`development` by default; set `production` on Railway)
+- `PUBLIC_BASE_URL` (recommended on Railway, e.g. `https://api.example.com`)
 
 AI/runtime tuning:
 - `AI_USER_COOLDOWN_SEC`
+- `AI_USER_LOCK_LEASE_SEC`
 - `AUDIO_BATCH_TRIGGER_COUNT`
 - `AUDIO_BATCH_MAX_WAIT_HOURS`
 - `AI_QUEUE_MAX_EVENTS_PER_RUN`
@@ -79,3 +82,13 @@ Debug (when enabled):
 ```bash
 make test
 ```
+
+## Railway Deploy Notes
+
+- This repo includes `railway.toml` with a production start command.
+- Recommended Railway env vars:
+  - `APP_ENV=production`
+  - `DATABASE_URL=<postgres connection>`
+  - `JWT_SECRET_KEY=<strong secret>`
+  - `PUBLIC_BASE_URL=<your public API URL>`
+  - `GEMINI_API_KEY=<if AI enabled>`

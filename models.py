@@ -165,3 +165,34 @@ class EggbookCommentGeneration(Base):
         default=datetime.datetime.utcnow,
         onupdate=datetime.datetime.utcnow
     )
+
+
+class UploadSession(Base):
+
+    __tablename__ = "upload_sessions"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"))
+    upload_token = Column(String, nullable=False)
+    content_type = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AiUserLock(Base):
+
+    __tablename__ = "ai_user_locks"
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True, index=True)
+    owner_token = Column(String, nullable=True)
+    locked_until = Column(DateTime, nullable=True)
+    last_run_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow
+    )

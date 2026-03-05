@@ -5,14 +5,16 @@ import re
 import time
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
-from threading import Lock
 from typing import Any, Dict, List, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import httpx
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from database import SessionLocal
 from models import (
+    AiUserLock,
     EggbookComment,
     EggbookCommentGeneration,
     Device,
@@ -27,9 +29,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview")
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 logger = logging.getLogger(__name__)
-_USER_GUARD = Lock()
-_USER_PROCESSING: set[str] = set()
-_USER_LAST_RUN_AT: Dict[str, float] = {}
 _LAST_AI_ERROR: Dict[str, Any] = {}
 COMMENT_STATUS_IDLE = "idle"
 COMMENT_STATUS_GENERATING = "generating"
@@ -752,73 +751,127 @@ def trigger_daily_comments_generation(
     return get_comment_generation_state(db, user_id, target_date)
 
 
-def _acquire_user_slot(user_id: str) -> bool:
+def _datetime_to_epoch_sec(dt: datetime | None) -> float | None:
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=timezone.utc).timestamp()
+
+
+def _acquire_user_slot(db: Session, user_id: str) -> tuple[bool, str | None]:
     cooldown_sec = float(os.getenv("AI_USER_COOLDOWN_SEC", "8"))
-    now = time.time()
-    with _USER_GUARD:
-        if user_id in _USER_PROCESSING:
-            return False
-        last_run = _USER_LAST_RUN_AT.get(user_id, 0.0)
-        if now - last_run < cooldown_sec:
-            return False
-        _USER_PROCESSING.add(user_id)
-        _USER_LAST_RUN_AT[user_id] = now
-        return True
+    lock_lease_sec = float(os.getenv("AI_USER_LOCK_LEASE_SEC", "600"))
+
+    for _ in range(3):
+        try:
+            now = datetime.utcnow()
+            query = db.query(AiUserLock).filter(AiUserLock.user_id == user_id)
+            if db.bind is not None and db.bind.dialect.name != "sqlite":
+                query = query.with_for_update()
+            lock_row = query.first()
+            if not lock_row:
+                lock_row = AiUserLock(user_id=user_id)
+                db.add(lock_row)
+                db.flush()
+
+            if lock_row.locked_until is not None and lock_row.locked_until > now:
+                return False, None
+
+            if lock_row.last_run_at is not None:
+                elapsed_sec = (now - lock_row.last_run_at).total_seconds()
+                if elapsed_sec < cooldown_sec:
+                    return False, None
+
+            owner_token = str(uuid.uuid4())
+            lock_row.owner_token = owner_token
+            lock_row.locked_until = now + timedelta(seconds=lock_lease_sec)
+            lock_row.last_run_at = now
+            db.commit()
+            return True, owner_token
+        except IntegrityError:
+            db.rollback()
+
+    return False, None
 
 
-def _release_user_slot(user_id: str) -> None:
-    with _USER_GUARD:
-        _USER_PROCESSING.discard(user_id)
+def _release_user_slot(db: Session, user_id: str, owner_token: str | None) -> None:
+    if not owner_token:
+        return
+    try:
+        row = db.query(AiUserLock).filter(AiUserLock.user_id == user_id).first()
+        if not row:
+            return
+        if row.owner_token != owner_token:
+            return
+        row.owner_token = None
+        row.locked_until = datetime.utcnow()
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to release AI user lock, user_id=%s", user_id)
 
 
 def _record_ai_error(user_id: str, event_id: str | None, exc: Exception) -> None:
-    with _USER_GUARD:
-        _LAST_AI_ERROR.clear()
-        _LAST_AI_ERROR.update(
-            {
-                "atEpochSec": time.time(),
-                "userId": user_id,
-                "eventId": event_id,
-                "type": type(exc).__name__,
-                "message": str(exc)[:500],
-            }
-        )
+    _LAST_AI_ERROR.clear()
+    _LAST_AI_ERROR.update(
+        {
+            "atEpochSec": time.time(),
+            "userId": user_id,
+            "eventId": event_id,
+            "type": type(exc).__name__,
+            "message": str(exc)[:500],
+        }
+    )
 
 
-def get_user_ai_runtime_state(user_id: str) -> Dict[str, Any]:
+def _get_user_ai_runtime_state_in_db(db: Session, user_id: str) -> Dict[str, Any]:
     cooldown_sec = float(os.getenv("AI_USER_COOLDOWN_SEC", "8"))
-    now = time.time()
-    with _USER_GUARD:
-        processing = user_id in _USER_PROCESSING
-        last_run_at = _USER_LAST_RUN_AT.get(user_id, 0.0)
-    elapsed = max(now - last_run_at, 0.0)
+    now = datetime.utcnow()
+    row = db.query(AiUserLock).filter(AiUserLock.user_id == user_id).first()
+    processing = bool(row and row.locked_until and row.locked_until > now)
+    last_run_at_epoch = _datetime_to_epoch_sec(row.last_run_at if row else None)
+    elapsed = 0.0
+    if last_run_at_epoch is not None:
+        elapsed = max(time.time() - last_run_at_epoch, 0.0)
     cooldown_remaining_sec = max(cooldown_sec - elapsed, 0.0)
     return {
         "aiEnabled": ai_enabled(),
         "userProcessing": processing,
         "cooldownSec": cooldown_sec,
-        "lastRunAtEpochSec": last_run_at if last_run_at > 0 else None,
+        "lastRunAtEpochSec": last_run_at_epoch,
         "cooldownRemainingSec": round(cooldown_remaining_sec, 3),
         "canRunNow": ai_enabled() and (not processing) and cooldown_remaining_sec <= 0,
     }
 
 
-def get_ai_runtime_snapshot(user_id: str | None = None) -> Dict[str, Any]:
-    with _USER_GUARD:
-        processing_users = list(_USER_PROCESSING)
-        tracked_users = len(_USER_LAST_RUN_AT)
-        last_error = dict(_LAST_AI_ERROR) if _LAST_AI_ERROR else None
+def get_user_ai_runtime_state(user_id: str) -> Dict[str, Any]:
+    db = SessionLocal()
+    try:
+        return _get_user_ai_runtime_state_in_db(db, user_id)
+    finally:
+        db.close()
 
-    snapshot = {
-        "aiEnabled": ai_enabled(),
-        "activeProcessingUserCount": len(processing_users),
-        "activeProcessingUsers": processing_users[:20],
-        "trackedUserCount": tracked_users,
-        "lastAiError": last_error,
-    }
-    if user_id:
-        snapshot["userRuntime"] = get_user_ai_runtime_state(user_id)
-    return snapshot
+
+def get_ai_runtime_snapshot(user_id: str | None = None) -> Dict[str, Any]:
+    now = datetime.utcnow()
+    db = SessionLocal()
+    try:
+        active_query = db.query(AiUserLock).filter(
+            AiUserLock.locked_until.is_not(None),
+            AiUserLock.locked_until > now,
+        )
+        processing_users = [row.user_id for row in active_query.limit(20).all()]
+        snapshot = {
+            "aiEnabled": ai_enabled(),
+            "activeProcessingUserCount": active_query.count(),
+            "activeProcessingUsers": processing_users,
+            "trackedUserCount": db.query(AiUserLock).count(),
+            "lastAiError": dict(_LAST_AI_ERROR) if _LAST_AI_ERROR else None,
+        }
+        if user_id:
+            snapshot["userRuntime"] = _get_user_ai_runtime_state_in_db(db, user_id)
+        return snapshot
+    finally:
+        db.close()
 
 
 def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
@@ -829,7 +882,8 @@ def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
             "hasUpdates": False,
         }
 
-    if not _acquire_user_slot(user_id):
+    acquired, owner_token = _acquire_user_slot(db, user_id)
+    if not acquired:
         logger.info("Skip AI run: user slot busy/cooldown, user_id=%s", user_id)
         return {
             "processedEventCount": 0,
@@ -938,7 +992,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
         _record_ai_error(user_id, trigger_event_id, exc)
         raise
     finally:
-        _release_user_slot(user_id)
+        _release_user_slot(db, user_id, owner_token)
 
 
 def process_events_ai(db: Session, user_id: str, trigger_event_id: str) -> None:
