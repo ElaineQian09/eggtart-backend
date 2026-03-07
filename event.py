@@ -79,8 +79,9 @@ def _event_ai_debug_flags(event: Event) -> dict:
 
     # Rule 1: screen recording exists -> single infer.
     rule1_eligible = has_screen_recording
-    # Rule 2: no recording urls and transcript exists -> batch infer.
-    rule2_eligible = (not has_screen_recording) and (not has_audio_url) and has_transcript
+    # Rule 2: no screen recording and transcript exists -> batch infer.
+    # Audio-only events typically keep audio_url even after STT; those should still be eligible.
+    rule2_eligible = (not has_screen_recording) and has_transcript
     eligible_any = rule1_eligible or rule2_eligible
 
     return {
@@ -188,6 +189,10 @@ class EventUpdateRequest(BaseModel):
     status: Optional[str] = None
     # Optional explicit trigger switch from client.
     finalize: Optional[bool] = None
+    # Client device local current time with timezone offset, ISO8601.
+    device_local_now: Optional[str] = None
+    # Camel-case alias for compatibility.
+    deviceLocalNow: Optional[str] = None
 
 
 def _stt_fill_transcript(event: Event, db: Session) -> None:
@@ -341,6 +346,8 @@ def update_event(
     if not event:
         raise HTTPException(404, "Event not found")
 
+    device_local_now = req.device_local_now or req.deviceLocalNow
+
     if req.audio_url is not None:
         event.audio_url = req.audio_url
     if req.screen_recording_url is not None:
@@ -474,7 +481,7 @@ def update_event(
             reason="ai_processing_started",
             source_event_id=event.id,
         )
-        ai_result = process_user_ai_queue(db, user_id)
+        ai_result = process_user_ai_queue(db, user_id, device_local_now=device_local_now)
     except (GeminiRateLimitError, GeminiTransientError):
         logger.warning("AI transient error for event %s, keeping status for retry", event.id)
         event.status = EVENT_STATUS_TRANSCRIBING

@@ -190,6 +190,37 @@ def _build_time_context(now_utc: datetime, user_timezone: str) -> str:
     )
 
 
+def _parse_device_local_now(value: Any) -> tuple[str | None, datetime | None]:
+    text = _safe_text(value)
+    if not text:
+        return None, None
+    iso_candidate = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(iso_candidate)
+    except Exception:
+        return None, None
+    if parsed.tzinfo is None:
+        return None, None
+    parsed_utc = parsed.astimezone(timezone.utc)
+    normalized = parsed.isoformat()
+    return normalized, parsed_utc
+
+
+def _build_time_context_with_device_now(
+    now_utc: datetime,
+    user_timezone: str,
+    device_local_now: str | None = None,
+) -> str:
+    base = _build_time_context(now_utc, user_timezone)
+    if not device_local_now:
+        return base
+    return (
+        f"{base}"
+        f"- device_local_now_with_offset: {device_local_now}\n"
+        "- Prefer device_local_now_with_offset as the user's current local time anchor.\n"
+    )
+
+
 def _user_tzinfo(user_timezone: str):
     tz_name = (user_timezone or "").strip() or "UTC"
     try:
@@ -347,6 +378,7 @@ def _build_items_prompt(
     single_mode: bool,
     now_utc: datetime,
     user_timezone: str,
+    device_local_now: str | None = None,
 ) -> str:
     serialized = [
         {
@@ -392,7 +424,7 @@ def _build_items_prompt(
             "- If a field has no meaningful content, use empty string.\n"
             "- You may output multiple items if the event contains multiple independent thoughts.\n"
             "- Preserve original language tone when possible.\n"
-            f"{_build_time_context(now_utc, user_timezone)}"
+            f"{_build_time_context_with_device_now(now_utc, user_timezone, device_local_now)}"
             f"Input event JSON:\n{json.dumps(serialized, ensure_ascii=True)}"
         )
 
@@ -427,7 +459,7 @@ def _build_items_prompt(
         "- If a field has no meaningful content, use empty string.\n"
         "- Prefer fewer, higher-quality items instead of repeating similar items.\n"
         "- Do not invent facts that are not grounded in the input events.\n"
-        f"{_build_time_context(now_utc, user_timezone)}"
+        f"{_build_time_context_with_device_now(now_utc, user_timezone, device_local_now)}"
         f"Input events JSON:\n{json.dumps(serialized, ensure_ascii=True)}"
     )
 
@@ -438,6 +470,7 @@ def _build_comments_prompt(
     alerts: List[EggbookNotification],
     now_utc: datetime,
     user_timezone: str,
+    device_local_now: str | None = None,
 ) -> str:
     payload = {
         "ideas": [
@@ -489,7 +522,7 @@ def _build_comments_prompt(
         "}\n"
         "\n"
         "Now generate comments based on today's context.\n"
-        f"{_build_time_context(now_utc, user_timezone)}"
+        f"{_build_time_context_with_device_now(now_utc, user_timezone, device_local_now)}"
         f"Input JSON:\n{json.dumps(payload, ensure_ascii=True)}"
     )
 
@@ -650,8 +683,10 @@ def trigger_daily_comments_generation(
     user_id: str,
     target_date: date_type,
     manual: bool = False,
+    device_local_now: str | None = None,
 ) -> Dict[str, Any]:
-    now_utc = datetime.now(timezone.utc)
+    normalized_device_local_now, device_now_utc = _parse_device_local_now(device_local_now)
+    now_utc = device_now_utc or datetime.now(timezone.utc)
     user_timezone = _get_user_timezone_hint(db, user_id)
     _cleanup_old_comment_data(db, user_id)
     state = _get_or_create_comment_state(db, user_id, target_date)
@@ -711,6 +746,7 @@ def trigger_daily_comments_generation(
                 alerts,
                 now_utc=now_utc,
                 user_timezone=user_timezone,
+                device_local_now=normalized_device_local_now,
             )
         )
         # Replace strategy: one latest generated comment set per user per day.
@@ -874,7 +910,11 @@ def get_ai_runtime_snapshot(user_id: str | None = None) -> Dict[str, Any]:
         db.close()
 
 
-def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
+def process_user_ai_queue(
+    db: Session,
+    user_id: str,
+    device_local_now: str | None = None,
+) -> Dict[str, Any]:
     if not ai_enabled():
         return {
             "processedEventCount": 0,
@@ -892,7 +932,8 @@ def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
         }
 
     try:
-        now_utc = datetime.now(timezone.utc)
+        normalized_device_local_now, device_now_utc = _parse_device_local_now(device_local_now)
+        now_utc = device_now_utc or datetime.now(timezone.utc)
         user_timezone = _get_user_timezone_hint(db, user_id)
         max_events_per_run = int(os.getenv("AI_QUEUE_MAX_EVENTS_PER_RUN", "0"))
         remaining_events = max_events_per_run if max_events_per_run > 0 else None
@@ -924,6 +965,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
                     single_mode=True,
                     now_utc=now_utc,
                     user_timezone=user_timezone,
+                    device_local_now=normalized_device_local_now,
                 )
             )
             items = payload.get("items") or []
@@ -940,6 +982,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
                 remaining_events = max(remaining_events - 1, 0)
 
         # Rule 2: no screen recording and transcript exists -> batch infer.
+        # Audio-only events remain eligible even when audio_url is present.
         batch_limit = 20
         if remaining_events is not None:
             batch_limit = max(min(20, remaining_events), 0)
@@ -963,6 +1006,7 @@ def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
                     single_mode=False,
                     now_utc=now_utc,
                     user_timezone=user_timezone,
+                    device_local_now=normalized_device_local_now,
                 )
             )
             items = payload.get("items") or []
@@ -979,7 +1023,13 @@ def process_user_ai_queue(db: Session, user_id: str) -> Dict[str, Any]:
             event.status = "processed"
         db.commit()
 
-        comments_state = trigger_daily_comments_generation(db, user_id, date_type.today(), manual=False)
+        comments_state = trigger_daily_comments_generation(
+            db,
+            user_id,
+            date_type.today(),
+            manual=False,
+            device_local_now=normalized_device_local_now,
+        )
         if comments_state.get("status") == COMMENT_STATUS_READY:
             updated_tabs.add("comments")
         return {

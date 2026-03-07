@@ -104,7 +104,9 @@ Request body:
   "transcript": "string (optional)",
   "duration_sec": 0 (optional),
   "event_at": "datetime (optional)",
-  "status": "pending | transcribing | processed | failed (optional)"
+  "status": "pending | transcribing | processed | failed (optional)",
+  "device_local_now": "ISO8601 datetime with timezone offset (optional, recommended; e.g. 2026-03-07T21:12:30-06:00)",
+  "deviceLocalNow": "same as device_local_now (optional camelCase alias)"
 }
 Response:
 {
@@ -207,8 +209,16 @@ Response:
   "items": [
     {
       "id": "string",
+      "source_event_id": "string or null",
+      "sourceEventId": "string or null",
       "title": "string or null",
       "content": "string",
+      "screen_recording_url": "string or null",
+      "screenRecordingUrl": "string or null",
+      "recording_url": "string or null",
+      "recordingUrl": "string or null",
+      "audio_url": "string or null",
+      "audioUrl": "string or null",
       "createdAt": "datetime",
       "updatedAt": "datetime"
     }
@@ -225,8 +235,16 @@ Response:
 {
   "item": {
     "id": "string",
+    "source_event_id": "string or null",
+    "sourceEventId": "string or null",
     "title": "string or null",
     "content": "string",
+    "screen_recording_url": "string or null",
+    "screenRecordingUrl": "string or null",
+    "recording_url": "string or null",
+    "recordingUrl": "string or null",
+    "audio_url": "string or null",
+    "audioUrl": "string or null",
     "createdAt": "datetime",
     "updatedAt": "datetime"
   }
@@ -237,8 +255,16 @@ Response:
 {
   "item": {
     "id": "string",
+    "source_event_id": "string or null",
+    "sourceEventId": "string or null",
     "title": "string or null",
     "content": "string",
+    "screen_recording_url": "string or null",
+    "screenRecordingUrl": "string or null",
+    "recording_url": "string or null",
+    "recordingUrl": "string or null",
+    "audio_url": "string or null",
+    "audioUrl": "string or null",
     "createdAt": "datetime",
     "updatedAt": "datetime"
   }
