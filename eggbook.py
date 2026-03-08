@@ -102,6 +102,7 @@ class CommentGenerateRequest(BaseModel):
 
 
 def idea_to_dict(idea: EggbookIdea):
+    media_kind = "screen" if (idea.screen_recording_url or "").strip() else "voice"
     return {
         "id": idea.id,
         "source_event_id": idea.source_event_id,
@@ -112,8 +113,7 @@ def idea_to_dict(idea: EggbookIdea):
         "screenRecordingUrl": idea.screen_recording_url,
         "audio_url": idea.audio_url,
         "audioUrl": idea.audio_url,
-        "recording_url": idea.recording_url,
-        "recordingUrl": idea.recording_url,
+        "mediaKind": media_kind,
         "createdAt": idea.created_at.isoformat(),
         "updatedAt": idea.updated_at.isoformat()
     }

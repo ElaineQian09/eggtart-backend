@@ -150,7 +150,7 @@ def _safe_text(value: Any) -> str:
 
 
 def _screen_recording_url(event: Event) -> str:
-    return (event.screen_recording_url or event.recording_url or "").strip()
+    return (event.screen_recording_url or "").strip()
 
 
 def _iso_utc(dt: datetime | None) -> str | None:
@@ -321,7 +321,6 @@ def _persist_items(
                         title=None,
                         content=None,
                         screen_recording_url=_screen_recording_url(source_event) or None,
-                        recording_url=source_event.recording_url,
                         audio_url=source_event.audio_url,
                     )
                     db.add(idea)
@@ -329,7 +328,6 @@ def _persist_items(
                 idea.title = idea_title or None
                 idea.content = idea_detail or idea_title
                 idea.screen_recording_url = _screen_recording_url(source_event) or None
-                idea.recording_url = source_event.recording_url
                 idea.audio_url = source_event.audio_url
                 idea_written = True
                 updated_tabs.add("ideas")
@@ -386,7 +384,6 @@ def _build_items_prompt(
             "event_at": _iso_utc(e.event_at),
             "audio_url": e.audio_url,
             "screen_recording_url": _screen_recording_url(e),
-            "recording_url": e.recording_url,
             "transcript": e.transcript,
             "duration_sec": e.duration_sec,
         }
@@ -627,7 +624,7 @@ def _get_daily_input_stats(db: Session, user_id: str, target_date: date_type) ->
         .all()
     )
     has_input = any(
-        bool((e.audio_url or "").strip() or (e.screen_recording_url or e.recording_url or "").strip())
+        bool((e.audio_url or "").strip() or (e.screen_recording_url or "").strip())
         for e in events
     )
     active_duration_sec = float(sum(float(e.duration_sec or 0) for e in events))
@@ -914,6 +911,7 @@ def process_user_ai_queue(
     db: Session,
     user_id: str,
     device_local_now: str | None = None,
+    preferred_event_id: str | None = None,
 ) -> Dict[str, Any]:
     if not ai_enabled():
         return {
@@ -939,15 +937,27 @@ def process_user_ai_queue(
         remaining_events = max_events_per_run if max_events_per_run > 0 else None
         updated_tabs: Set[str] = set()
 
-        trigger_event = (
-            db.query(Event)
-            .filter(
-                Event.user_id == user_id,
-                Event.status.in_(["pending", "transcribing", "failed"]),
+        trigger_event = None
+        if preferred_event_id:
+            trigger_event = (
+                db.query(Event)
+                .filter(
+                    Event.id == preferred_event_id,
+                    Event.user_id == user_id,
+                    Event.status.in_(["pending", "transcribing", "failed"]),
+                )
+                .first()
             )
-            .order_by(Event.event_at.asc())
-            .first()
-        )
+        if trigger_event is None:
+            trigger_event = (
+                db.query(Event)
+                .filter(
+                    Event.user_id == user_id,
+                    Event.status.in_(["pending", "transcribing", "failed"]),
+                )
+                .order_by(Event.event_at.asc())
+                .first()
+            )
         if not trigger_event:
             return {
                 "processedEventCount": 0,
@@ -991,7 +1001,6 @@ def process_user_ai_queue(
             .filter(
                 Event.user_id == user_id,
                 Event.screen_recording_url.is_(None),
-                Event.recording_url.is_(None),
                 Event.transcript.is_not(None),
                 Event.status.in_(["pending", "transcribing", "failed"]),
             )
@@ -1047,5 +1056,4 @@ def process_user_ai_queue(
 
 def process_events_ai(db: Session, user_id: str, trigger_event_id: str) -> None:
     # Backward-compatible wrapper.
-    _ = trigger_event_id
-    process_user_ai_queue(db, user_id)
+    process_user_ai_queue(db, user_id, preferred_event_id=trigger_event_id)

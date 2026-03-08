@@ -75,7 +75,6 @@ Request body:
   "device_id": "string",
   "audio_url": "string or null",
   "screen_recording_url": "string or null",
-  "recording_url": "string or null (deprecated, backward compatibility)",
   "transcript": "string or null",
   "duration_sec": 0 (optional),
   "event_at": "datetime (optional, default now)"
@@ -84,9 +83,9 @@ Response:
 {
   "eventId": "string",
   "deviceId": "string",
-  "recordingUrl": "string or null (backward-compatible alias of screenRecordingUrl)",
   "audioUrl": "string or null",
   "screenRecordingUrl": "string or null",
+  "mediaKind": "voice | screen",
   "transcript": "string or null",
   "durationSec": 0,
   "eventAt": "datetime",
@@ -100,7 +99,6 @@ Request body:
 {
   "audio_url": "string (optional)",
   "screen_recording_url": "string (optional)",
-  "recording_url": "string (optional, deprecated, backward compatibility)",
   "transcript": "string (optional)",
   "duration_sec": 0 (optional),
   "event_at": "datetime (optional)",
@@ -112,9 +110,9 @@ Response:
 {
   "eventId": "string",
   "deviceId": "string",
-  "recordingUrl": "string or null",
   "audioUrl": "string or null",
   "screenRecordingUrl": "string or null",
+  "mediaKind": "voice | screen",
   "transcript": "string or null",
   "durationSec": 0,
   "eventAt": "datetime",
@@ -128,9 +126,9 @@ Response:
 {
   "eventId": "string",
   "deviceId": "string",
-  "recordingUrl": "string or null",
   "audioUrl": "string or null",
   "screenRecordingUrl": "string or null",
+  "mediaKind": "voice | screen",
   "transcript": "string or null",
   "durationSec": 0,
   "eventAt": "datetime",
@@ -215,10 +213,9 @@ Response:
       "content": "string",
       "screen_recording_url": "string or null",
       "screenRecordingUrl": "string or null",
-      "recording_url": "string or null",
-      "recordingUrl": "string or null",
       "audio_url": "string or null",
       "audioUrl": "string or null",
+      "mediaKind": "voice | screen",
       "createdAt": "datetime",
       "updatedAt": "datetime"
     }
@@ -241,10 +238,9 @@ Response:
     "content": "string",
     "screen_recording_url": "string or null",
     "screenRecordingUrl": "string or null",
-    "recording_url": "string or null",
-    "recordingUrl": "string or null",
     "audio_url": "string or null",
     "audioUrl": "string or null",
+    "mediaKind": "voice | screen",
     "createdAt": "datetime",
     "updatedAt": "datetime"
   }
@@ -261,10 +257,9 @@ Response:
     "content": "string",
     "screen_recording_url": "string or null",
     "screenRecordingUrl": "string or null",
-    "recording_url": "string or null",
-    "recordingUrl": "string or null",
     "audio_url": "string or null",
     "audioUrl": "string or null",
+    "mediaKind": "voice | screen",
     "createdAt": "datetime",
     "updatedAt": "datetime"
   }
@@ -518,10 +513,9 @@ Response:
   - If `transcript` is empty and `audio_url` is present, backend attempts STT first.
   - On STT success, transcript is written back to event.
 - Event inference behavior:
-  - Single inference for event when `screen_recording_url` (or backward-compatible `recording_url`) is present.
+  - Single inference for event when `screen_recording_url` is present.
   - Batch inference for unprocessed events where:
     - `screen_recording_url` is null
-    - `recording_url` is null
     - `transcript` is not null
 - AI outputs are persisted into:
   - `eggbook_ideas`

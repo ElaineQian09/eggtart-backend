@@ -48,14 +48,14 @@ def get_user_id(authorization: str) -> str:
 
 
 def event_to_dict(event: Event):
-    screen_recording_url = event.screen_recording_url or event.recording_url
+    screen_recording_url = event.screen_recording_url
+    media_kind = "screen" if (screen_recording_url or "").strip() else "voice"
     return {
         "eventId": event.id,
         "deviceId": event.device_id,
-        # Backward-compatible field for existing clients.
-        "recordingUrl": screen_recording_url,
         "audioUrl": event.audio_url,
         "screenRecordingUrl": screen_recording_url,
+        "mediaKind": media_kind,
         "transcript": event.transcript,
         "durationSec": int(event.duration_sec or 0),
         "eventAt": event.event_at.isoformat(),
@@ -74,7 +74,7 @@ def infer_status(audio_url: Optional[str], screen_recording_url: Optional[str], 
 
 def _event_ai_debug_flags(event: Event) -> dict:
     has_audio_url = bool((event.audio_url or "").strip())
-    has_screen_recording = bool((event.screen_recording_url or event.recording_url or "").strip())
+    has_screen_recording = bool((event.screen_recording_url or "").strip())
     has_transcript = bool((event.transcript or "").strip())
 
     # Rule 1: screen recording exists -> single infer.
@@ -102,7 +102,6 @@ def _audio_batch_candidates_query(db: Session, user_id: str):
             Event.audio_url.is_not(None),
             Event.transcript.is_(None),
             Event.screen_recording_url.is_(None),
-            Event.recording_url.is_(None),
             Event.status.in_([EVENT_STATUS_PENDING, EVENT_STATUS_TRANSCRIBING, EVENT_STATUS_FAILED]),
         )
         .order_by(Event.event_at.asc())
@@ -122,7 +121,6 @@ def _pending_input_candidates_query(db: Session, user_id: str):
             (
                 Event.audio_url.is_not(None)
                 | Event.screen_recording_url.is_not(None)
-                | Event.recording_url.is_not(None)
                 | Event.transcript.is_not(None)
             ),
         )
@@ -171,8 +169,6 @@ class EventCreateRequest(BaseModel):
     device_id: str
     audio_url: Optional[str] = None
     screen_recording_url: Optional[str] = None
-    # Deprecated, keep for backward compatibility.
-    recording_url: Optional[str] = None
     transcript: Optional[str] = None
     duration_sec: Optional[int] = 0
     event_at: Optional[datetime] = None
@@ -181,8 +177,6 @@ class EventCreateRequest(BaseModel):
 class EventUpdateRequest(BaseModel):
     audio_url: Optional[str] = None
     screen_recording_url: Optional[str] = None
-    # Deprecated, keep for backward compatibility.
-    recording_url: Optional[str] = None
     transcript: Optional[str] = None
     duration_sec: Optional[int] = None
     event_at: Optional[datetime] = None
@@ -226,7 +220,6 @@ def _stt_source_urls(event: Event) -> list[str]:
     candidates = [
         (event.audio_url or "").strip(),
         (event.screen_recording_url or "").strip(),
-        (event.recording_url or "").strip(),
     ]
     deduped = []
     for url in candidates:
@@ -238,14 +231,14 @@ def _stt_source_urls(event: Event) -> list[str]:
 def _has_media_url(event: Event) -> bool:
     return bool(
         (event.audio_url or "").strip()
-        or (event.screen_recording_url or event.recording_url or "").strip()
+        or (event.screen_recording_url or "").strip()
     )
 
 
 def _has_any_input(event: Event) -> bool:
     return bool(
         (event.audio_url or "").strip()
-        or (event.screen_recording_url or event.recording_url or "").strip()
+        or (event.screen_recording_url or "").strip()
         or (event.transcript or "").strip()
     )
 
@@ -305,7 +298,7 @@ def create_event(
         raise HTTPException(404, "Device not found")
 
     event_at = req.event_at or datetime.now(timezone.utc)
-    screen_recording_url = req.screen_recording_url or req.recording_url
+    screen_recording_url = req.screen_recording_url
     # POST only stores event; AI/STT is triggered on PATCH finalization.
     status = EVENT_STATUS_PENDING
 
@@ -313,7 +306,6 @@ def create_event(
         id=str(uuid.uuid4()),
         user_id=user_id,
         device_id=req.device_id,
-        recording_url=screen_recording_url,
         audio_url=req.audio_url,
         screen_recording_url=screen_recording_url,
         transcript=req.transcript,
@@ -352,10 +344,6 @@ def update_event(
         event.audio_url = req.audio_url
     if req.screen_recording_url is not None:
         event.screen_recording_url = req.screen_recording_url
-        event.recording_url = req.screen_recording_url
-    if req.recording_url is not None:
-        event.recording_url = req.recording_url
-        event.screen_recording_url = req.recording_url
     if req.transcript is not None:
         event.transcript = req.transcript
     if req.duration_sec is not None:
@@ -368,12 +356,12 @@ def update_event(
             raise HTTPException(400, "Invalid status")
         event.status = req.status
     else:
-        screen_recording_url = event.screen_recording_url or event.recording_url
+        screen_recording_url = event.screen_recording_url
         event.status = infer_status(event.audio_url, screen_recording_url, event.transcript)
 
     db.commit()
     # Create or refresh a placeholder idea for screen recordings.
-    screen_recording_url = event.screen_recording_url or event.recording_url
+    screen_recording_url = event.screen_recording_url
     if screen_recording_url:
         idea = (
             db.query(EggbookIdea)
@@ -388,13 +376,11 @@ def update_event(
                 title=None,
                 content=None,
                 screen_recording_url=screen_recording_url,
-                recording_url=event.recording_url,
                 audio_url=event.audio_url,
             )
             db.add(idea)
         else:
             idea.screen_recording_url = screen_recording_url
-            idea.recording_url = event.recording_url
             idea.audio_url = event.audio_url
         db.commit()
 
@@ -422,7 +408,7 @@ def update_event(
     if oldest_pending_input_at is not None:
         threshold_dt = datetime.utcnow() - timedelta(hours=AUDIO_BATCH_MAX_WAIT_HOURS)
         batch_wait_exceeded = oldest_pending_input_at <= threshold_dt
-    has_screen_recording = bool((event.screen_recording_url or event.recording_url or "").strip())
+    has_screen_recording = bool((event.screen_recording_url or "").strip())
     should_delay_input_processing = (
         _has_any_input(event)
         and not has_screen_recording
@@ -481,11 +467,23 @@ def update_event(
             reason="ai_processing_started",
             source_event_id=event.id,
         )
-        ai_result = process_user_ai_queue(db, user_id, device_local_now=device_local_now)
+        ai_result = process_user_ai_queue(
+            db,
+            user_id,
+            device_local_now=device_local_now,
+            preferred_event_id=event.id,
+        )
     except (GeminiRateLimitError, GeminiTransientError):
-        logger.warning("AI transient error for event %s, keeping status for retry", event.id)
-        event.status = EVENT_STATUS_TRANSCRIBING
+        logger.warning("AI transient error for event %s, marking failed", event.id)
+        event.status = EVENT_STATUS_FAILED
         db.commit()
+        publish_eggbook_sync_event(
+            user_id=user_id,
+            processing=False,
+            updates=False,
+            reason="error",
+            source_event_id=event.id,
+        )
     except Exception:
         logger.exception("AI processing failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
@@ -655,7 +653,7 @@ def debug_event_linked_idea(
             "title": idea.title,
             "content": idea.content,
             "screenRecordingUrl": idea.screen_recording_url,
-            "recordingUrl": idea.recording_url,
+            "mediaKind": "screen" if (idea.screen_recording_url or "").strip() else "voice",
             "audioUrl": idea.audio_url,
             "createdAt": idea.created_at.isoformat(),
             "updatedAt": idea.updated_at.isoformat(),

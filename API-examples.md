@@ -54,7 +54,8 @@ POST `/v1/events`
 ```json
 {
   "device_id": "device-001",
-  "recording_url": null,
+  "audio_url": "https://cdn.example.com/audio/call-mix.m4a",
+  "screen_recording_url": null,
   "transcript": "I want to remember to call Alex tomorrow",
   "duration_sec": 0,
   "event_at": "2026-02-04T09:00:00Z"
@@ -64,7 +65,8 @@ POST `/v1/events`
 PATCH `/v1/events/{event_id}`
 ```json
 {
-  "recording_url": "https://cdn.example.com/recordings/abc.mp4",
+  "screen_recording_url": "https://cdn.example.com/recordings/abc.mp4",
+  "audio_url": "https://cdn.example.com/audio/abc-mic.m4a",
   "duration_sec": 120
 }
 ```
@@ -96,7 +98,7 @@ Response (example):
 
 Then:
 - Use `PUT {uploadUrl}` with raw file body.
-- Store `fileUrl` in `events.recording_url`.
+- Store `fileUrl` in `events.audio_url` or `events.screen_recording_url` based on media type.
 
 ---
 
