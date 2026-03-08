@@ -169,9 +169,13 @@ GET /v1/eggbook/sync-status
 Response:
 {
   "status": "ok",
-  "lastSyncAt": null,
+  "lastSyncAt": "datetime or null",
   "processing": true,
-  "hasUpdates": false
+  "hasUpdates": false,
+  "syncState": "idle | processing | updated | failed",
+  "sequence": 12,
+  "stateChangedAt": "datetime or null",
+  "sourceEventId": "string or null"
 }
 
 WS /v1/eggbook/ws?token=<jwt>
@@ -185,6 +189,9 @@ WS /v1/eggbook/ws?token=<jwt>
   "data": {
     "processing": true,
     "updates": false,
+    "state": "idle | processing | updated | failed",
+    "sequence": 12,
+    "stateChangedAt": "datetime or null",
     "reason": "event_queued | ai_processing_started | ai_processing_done | eggbook_materialized | error",
     "sourceEventId": "optional-event-id",
     "updatedTabs": ["ideas", "todos", "notifications", "comments"]

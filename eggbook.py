@@ -4,7 +4,6 @@ import asyncio
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
@@ -15,6 +14,11 @@ from database import get_db
 from auth import verify_token
 from ai_pipeline import get_comment_generation_state, trigger_daily_comments_generation
 from eggbook_sync_push import get_eggbook_sync_broker
+from eggbook_sync_state import (
+    SYNC_PROCESSING,
+    SYNC_UPDATED,
+    get_sync_state_snapshot,
+)
 from models import (
     EggbookIdea,
     EggbookTodo,
@@ -162,31 +166,18 @@ def get_sync_status(
     db: Session = Depends(get_db),
 ):
     user_id = get_user_id(authorization)
-    pending_ideas = (
-        db.query(EggbookIdea)
-        .filter(
-            EggbookIdea.user_id == user_id,
-            or_(
-                EggbookIdea.title.is_(None),
-                EggbookIdea.title == "",
-                EggbookIdea.content.is_(None),
-                EggbookIdea.content == "",
-            ),
-        )
-        .count()
-    )
-    total_ideas = (
-        db.query(EggbookIdea)
-        .filter(EggbookIdea.user_id == user_id)
-        .count()
-    )
-    processing = pending_ideas > 0
-    has_updates = (not processing) and total_ideas > 0
+    snapshot = get_sync_state_snapshot(db, user_id)
+    processing = snapshot["state"] == SYNC_PROCESSING
+    has_updates = snapshot["state"] == SYNC_UPDATED
     return {
         "status": "ok",
-        "lastSyncAt": None,
+        "lastSyncAt": snapshot["stateChangedAt"],
         "processing": processing,
         "hasUpdates": has_updates,
+        "syncState": snapshot["state"],
+        "sequence": snapshot["sequence"],
+        "stateChangedAt": snapshot["stateChangedAt"],
+        "sourceEventId": snapshot["sourceEventId"],
     }
 
 

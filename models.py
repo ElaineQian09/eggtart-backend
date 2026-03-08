@@ -1,6 +1,6 @@
 # models.py
 
-from sqlalchemy import Column, String, DateTime, ForeignKey, Float, Boolean, Date
+from sqlalchemy import Column, String, DateTime, ForeignKey, Float, Boolean, Date, Integer
 from database import Base
 import datetime
 
@@ -120,6 +120,26 @@ class EggbookNotification(Base):
 
     title = Column(String)
     notify_at = Column(DateTime)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow
+    )
+
+
+class EggbookSyncState(Base):
+
+    __tablename__ = "eggbook_sync_states"
+
+    user_id = Column(String, ForeignKey("users.id"), primary_key=True, index=True)
+    state = Column(String, default="idle")
+    sequence = Column(Integer, default=0)
+    last_source_event_id = Column(String, nullable=True)
+    state_changed_at = Column(DateTime, default=datetime.datetime.utcnow)
+    last_reason = Column(String, nullable=True)
+    updated_tabs_json = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(

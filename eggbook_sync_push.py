@@ -65,6 +65,9 @@ class EggbookSyncBroker:
         reason: str,
         source_event_id: Optional[str] = None,
         updated_tabs: Optional[list[str]] = None,
+        sequence: Optional[int] = None,
+        state_changed_at: Optional[str] = None,
+        state: Optional[str] = None,
     ) -> None:
         with self._guard:
             loop = self._loop
@@ -82,6 +85,9 @@ class EggbookSyncBroker:
                 "reason": reason,
                 "sourceEventId": source_event_id,
                 "updatedTabs": updated_tabs or [],
+                "sequence": sequence,
+                "stateChangedAt": state_changed_at,
+                "state": state,
             },
         }
         event_text = json.dumps(envelope, ensure_ascii=True)
@@ -136,6 +142,9 @@ def publish_eggbook_sync_event(
     reason: str,
     source_event_id: Optional[str] = None,
     updated_tabs: Optional[list[str]] = None,
+    sequence: Optional[int] = None,
+    state_changed_at: Optional[str] = None,
+    state: Optional[str] = None,
 ) -> None:
     _BROKER.publish(
         user_id=user_id,
@@ -144,4 +153,7 @@ def publish_eggbook_sync_event(
         reason=reason,
         source_event_id=source_event_id,
         updated_tabs=updated_tabs,
+        sequence=sequence,
+        state_changed_at=state_changed_at,
+        state=state,
     )

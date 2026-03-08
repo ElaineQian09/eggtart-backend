@@ -17,7 +17,13 @@ from ai_pipeline import (
     process_user_ai_queue,
 )
 from database import get_db
-from eggbook_sync_push import publish_eggbook_sync_event
+from eggbook_sync_state import (
+    SYNC_FAILED,
+    SYNC_IDLE,
+    SYNC_PROCESSING,
+    SYNC_UPDATED,
+    transition_sync_state_and_publish,
+)
 from models import Device, Event, EggbookIdea
 from stt_client import stt_enabled, transcribe_audio_from_url
 
@@ -394,10 +400,10 @@ def update_event(
         payload["eventId"] = event.id
         return payload
 
-    publish_eggbook_sync_event(
+    transition_sync_state_and_publish(
+        db=db,
         user_id=user_id,
-        processing=True,
-        updates=False,
+        target_state=SYNC_PROCESSING,
         reason="event_queued",
         source_event_id=event.id,
     )
@@ -434,10 +440,10 @@ def update_event(
         logger.exception("STT failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
-        publish_eggbook_sync_event(
+        transition_sync_state_and_publish(
+            db=db,
             user_id=user_id,
-            processing=False,
-            updates=False,
+            target_state=SYNC_FAILED,
             reason="error",
             source_event_id=event.id,
         )
@@ -448,10 +454,10 @@ def update_event(
     if not ai_enabled():
         event.status = EVENT_STATUS_PENDING
         db.commit()
-        publish_eggbook_sync_event(
+        transition_sync_state_and_publish(
+            db=db,
             user_id=user_id,
-            processing=False,
-            updates=False,
+            target_state=SYNC_FAILED,
             reason="error",
             source_event_id=event.id,
         )
@@ -460,10 +466,10 @@ def update_event(
         return payload
 
     try:
-        publish_eggbook_sync_event(
+        transition_sync_state_and_publish(
+            db=db,
             user_id=user_id,
-            processing=True,
-            updates=False,
+            target_state=SYNC_PROCESSING,
             reason="ai_processing_started",
             source_event_id=event.id,
         )
@@ -477,10 +483,10 @@ def update_event(
         logger.warning("AI transient error for event %s, marking failed", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
-        publish_eggbook_sync_event(
+        transition_sync_state_and_publish(
+            db=db,
             user_id=user_id,
-            processing=False,
-            updates=False,
+            target_state=SYNC_FAILED,
             reason="error",
             source_event_id=event.id,
         )
@@ -488,10 +494,10 @@ def update_event(
         logger.exception("AI processing failed for event %s", event.id)
         event.status = EVENT_STATUS_FAILED
         db.commit()
-        publish_eggbook_sync_event(
+        transition_sync_state_and_publish(
+            db=db,
             user_id=user_id,
-            processing=False,
-            updates=False,
+            target_state=SYNC_FAILED,
             reason="error",
             source_event_id=event.id,
         )
@@ -499,10 +505,10 @@ def update_event(
         db.refresh(event)
         updated_tabs = ai_result.get("updatedTabs") or []
         has_updates = bool(ai_result.get("hasUpdates"))
-        publish_eggbook_sync_event(
+        transition_sync_state_and_publish(
+            db=db,
             user_id=user_id,
-            processing=False,
-            updates=has_updates,
+            target_state=SYNC_UPDATED if has_updates else SYNC_IDLE,
             reason="eggbook_materialized" if has_updates else "ai_processing_done",
             source_event_id=event.id,
             updated_tabs=updated_tabs,
