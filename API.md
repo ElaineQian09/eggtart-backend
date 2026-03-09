@@ -90,6 +90,7 @@ Response:
   "durationSec": 0,
   "eventAt": "datetime",
   "status": "pending | transcribing | processed | failed",
+  "retryable": true,
   "createdAt": "datetime",
   "updatedAt": "datetime"
 }
@@ -117,6 +118,7 @@ Response:
   "durationSec": 0,
   "eventAt": "datetime",
   "status": "pending | transcribing | processed | failed",
+  "retryable": true,
   "createdAt": "datetime",
   "updatedAt": "datetime"
 }
@@ -133,6 +135,7 @@ Response:
   "durationSec": 0,
   "eventAt": "datetime",
   "status": "pending | transcribing | processed | failed",
+  "retryable": true,
   "createdAt": "datetime",
   "updatedAt": "datetime"
 }
@@ -140,7 +143,8 @@ Response:
 GET /v1/events/{id}/status
 Response:
 {
-  "status": "pending | transcribing | processed | failed"
+  "status": "pending | transcribing | processed | failed",
+  "retryable": true
 }
 
 ---

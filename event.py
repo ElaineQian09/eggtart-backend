@@ -66,6 +66,7 @@ def event_to_dict(event: Event):
         "durationSec": int(event.duration_sec or 0),
         "eventAt": event.event_at.isoformat(),
         "status": event.status,
+        "retryable": event.status == EVENT_STATUS_FAILED,
         "createdAt": event.created_at.isoformat(),
         "updatedAt": event.updated_at.isoformat(),
     }
@@ -451,6 +452,21 @@ def update_event(
         payload["eventId"] = event.id
         return payload
 
+    if not (event.transcript or "").strip():
+        logger.warning("Event %s has no transcript after STT; marking failed", event.id)
+        event.status = EVENT_STATUS_FAILED
+        db.commit()
+        transition_sync_state_and_publish(
+            db=db,
+            user_id=user_id,
+            target_state=SYNC_FAILED,
+            reason="error",
+            source_event_id=event.id,
+        )
+        payload = event_to_dict(event)
+        payload["eventId"] = event.id
+        return payload
+
     if not ai_enabled():
         event.status = EVENT_STATUS_PENDING
         db.commit()
@@ -550,7 +566,10 @@ def get_event_status(
     )
     if not event:
         raise HTTPException(404, "Event not found")
-    return {"status": event.status}
+    return {
+        "status": event.status,
+        "retryable": event.status == EVENT_STATUS_FAILED,
+    }
 
 
 @router.get("/v1/debug/events/{event_id}/ai-state")

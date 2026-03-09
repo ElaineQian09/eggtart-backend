@@ -967,12 +967,11 @@ def process_user_ai_queue(
 
         events_to_mark_processed: List[Event] = []
 
-        trigger_has_screen = bool(_screen_recording_url(trigger_event))
         trigger_has_transcript = bool((trigger_event.transcript or "").strip())
 
-        # Rule 1: screen recording exists -> infer this event independently.
-        # Rule 1b: preferred voice event with transcript -> infer independently to preserve media linkage.
-        if (trigger_has_screen or trigger_has_transcript) and trigger_event.status != "processed":
+        # Run Gemini extraction only when transcript text exists.
+        # This keeps extraction on the more stable text path instead of media URL fallback semantics.
+        if trigger_has_transcript and trigger_event.status != "processed":
             payload = _call_gemini_json(
                 _build_items_prompt(
                     [trigger_event],
